@@ -1,0 +1,752 @@
+================================================================================
+VLEEDS — COMPLETION REPORT
+Story:   P1-E5 — Decision-Maker + Contact Discovery Foundation (Hunter Domain Search)
+Date:    2026-10-09
+Status:  COMPLETE (development verification on embedded Postgres/PGlite,
+         mocked provider).
+
+  ******************************************************************
+  *  REAL SUPABASE PRE-PRODUCTION VERIFICATION: STILL OPEN          *
+  *  All seven DB suites (186 tests: 36 tenancy + 41 ICP + 40 lead  *
+  *  core + 20 imports + 18 discovery + 17 enrichment + 14 contact  *
+  *  discovery) have run ONLY on PGlite with the Supabase shim,     *
+  *  never on a real Supabase/Postgres stack. Docker is still       *
+  *  unavailable. Not attempted in this story. Mandatory gate       *
+  *  before production.                                             *
+  ******************************************************************
+
+  HUNTER CONTACT-DISCOVERY AUTOMATED TESTING:
+  MOCKED — NO REAL CREDITS CONSUMED
+
+  LIVE HUNTER DOMAIN SEARCH:
+  NOT RUN (HUNTER_API_KEY not configured)
+  (Also still open: live Hunter Domain Finder/Company Enrichment and live
+  Google Places smoke tests — no keys.)
+================================================================================
+
+CONTENTS
+  1 Summary                       12 Contact candidates          23 Company drawer integration
+  2 Files created                 13 Role matching               24 Responsive behaviour
+  3 Files modified                14 Verification/confidence     25 Accessibility
+  4 Migration/schema              15 Deduplication               26 Tests added
+  5 P1-E4 open-run correction     16 Existing-contact handling   27 Test results
+  6 ContactDiscoveryProvider      17 Cross-company conflicts     28 Live Domain Search status
+  7 Hunter Domain Search adapter  18 Suppression behaviour       29 Code-quality review
+  8 Hunter configuration          19 Contact commit              30 Canonical-design deviations
+  9 Company/domain requirement    20 Hunter source evidence      31 Unresolved issues
+ 10 ICP role integration          21 Provider usage              32 Screenshots
+ 11 Search request model          22 Credit estimates            33 Exact recommended next story
+
+
+--------------------------------------------------------------------------------
+1. SUMMARY
+--------------------------------------------------------------------------------
+A company with a durable domain now has "Find decision makers" in the company
+drawer:
+  company domain + the selected ICP's decision-maker roles (or titles typed
+  for this search) → ONE explicit Hunter Domain Search (≤ 10 people, one
+  page, "estimated up to 1 credit") → candidate review → Select / Dismiss /
+  Undo → "Save N contacts" → contacts written through the existing contact
+  matching and ingest_lead path, with Hunter evidence.
+Each candidate shows:
+  - transparent role-match labels (Primary/Secondary/Fallback title match,
+    Hunter decision maker, Executive seniority)
+  - email status and Hunter confidence as reported, kept separate
+  - Existing contact / Possible duplicate / Contact already belongs to
+    another company / Restricted
+Selection is never automatic, and there are no automatic second searches or
+pages. Company and person responsibilities stay separate (no company
+evidence is written). A generic ContactDiscoveryProvider contract keeps
+Hunter's Domain Search shapes inside one adapter folder, which reuses the
+P1-E4 Hunter client.
+Also closed: P1-E4 F1 (at most one OPEN enrichment run per discovery
+reference: DB index + the start action returns the open run).
+Not done (by design): Multi-Domain Search, Email Finder, Email Verifier,
+Email/Combined Enrichment, Apollo, scoring, outreach of any kind, Today
+changes.
+Quality gate: npm.cmd run verify EXIT 0 (403/403 tests). Browser reviews:
+  - P1-E5: configured 72/72, not configured 6/6
+  - regressions: P1-E4 62/62 + 8/8, P1-E3 57/57 + 8/8, P1-E2 81/81,
+    P1-E1 40/40, S2 66/66, S1A 50/50
+
+
+--------------------------------------------------------------------------------
+2. FILES CREATED
+--------------------------------------------------------------------------------
+Database
+  supabase/migrations/20261013000000_contact_discovery_hunter.sql
+Provider layer (src/lib/providers/contact-discovery/)
+  types.ts             generic contract, capabilities, candidate, usage,
+                       statuses
+  registry.ts          server-only; HUNTER_API_KEY / HUNTER_API_ENDPOINT
+  hunter/usage.ts      endpoint, limits, credit rule + estimate, Hunter
+                       seniority/department lists
+  hunter/schemas.ts    the Domain Search parts Vleeds reads
+  hunter/mapper.ts     person → candidate (minimal fields; skip
+                       nameless/generic/duplicate)
+  hunter/adapter.ts    ContactDiscoveryProvider; request params; reuses
+                       the P1-E4 hunterGet client
+Contact-discovery domain
+  src/lib/contact-discovery/model.ts    titles, role matching, labels,
+                                        ordering, classification,
+                                        decisions, commit planning, views,
+                                        messages
+  src/lib/contact-discovery/service.ts  search → usage → candidates; save;
+                                        view
+DAL
+  src/lib/dal/contact-discovery.ts      runs, candidates, decisions,
+                                        commit RPC, company re-read,
+                                        email lookup, last search
+Server actions
+  src/app/w/[workspaceId]/leads/contact-discovery-actions.ts
+      start, retry, decide, save, cancel
+UI (src/components/contacts/)
+  contact-discovery-sheet.tsx   4-stage sheet (setup / review / save /
+                                result), table lg+ / cards below
+  find-decision-makers.tsx      drawer control: reasons, button, last search
+Tests, fixtures, tooling
+  tests/unit/contact-discovery.test.ts     28 unit tests
+  tests/db/contact-discovery.test.ts       14 data-boundary tests (PGlite)
+  tests/fixtures/hunter-domain-search.ts   fictional Domain Search responses
+  scripts/ui-review/review-contacts.mjs    78 browser checks (2 phases),
+                                           screenshots 01–16
+Docs
+  docs/product/vleeds-contact-discovery.md
+  docs/reports/P1-E5-vleeds-hunter-contact-discovery.txt (this file)
+  docs/reports/screenshots/P1-E5/*.png (16)
+
+
+--------------------------------------------------------------------------------
+3. FILES MODIFIED
+--------------------------------------------------------------------------------
+  src/lib/dal/provider-usage.ts      recordContactSearchUsage,
+                                     contactRunCreditMillis; monthly summary
+                                     split (company enrichment /
+                                     decision-maker searches / total)
+  src/lib/dal/enrichment.ts          openEnrichmentRunForCandidate (F1)
+  src/lib/dal/discovery.ts           ICP options include configured
+                                     decision-maker roles
+  src/lib/dal/index.ts               exports
+  src/app/w/[workspaceId]/enrichment/actions.ts  F1: a second start
+                                     continues the open run (also on a
+                                     unique-index race)
+  src/app/w/[workspaceId]/leads/page.tsx  contact-discovery state for the
+                                     drawer (provider, ICP roles, last
+                                     search)
+  src/components/leads/company-drawer.tsx  "Find decision makers" in
+                                     Contacts
+  src/components/enrichment/company-data-panel.tsx  usage breakdown
+                                     (company enrichment · decision-maker
+                                     searches · total)
+  src/components/settings/config-sheet.tsx  optional `wide` (review tables);
+                                     default unchanged
+  src/lib/lead-core/schemas.ts       labels for contact.seniority /
+                                     department / verification_status /
+                                     provider_decision_maker
+  src/lib/supabase/database.types.ts + 2 tables, usage columns,
+                                     commit_contact_candidate
+                                     (hand-maintained)
+  scripts/check-client-bundle.mjs    + /v2/domain-search
+  scripts/ui-review/mock-supabase.mjs  fictional Domain Search, Beta ICP
+                                     roles, one contact email (cross-company
+                                     case), contact tables + RPC
+  scripts/ui-review/review-enrichment.mjs  updated usage-copy check
+  tests/unit/business-agnostic.test.ts  "hunter.io" also allowed in
+                                     contact-discovery/hunter + review
+                                     script; domain-search path confined to
+                                     the adapter; P1-E5 fixture names
+                                     banned from runtime
+  tests/db/enrichment.test.ts        the P1-E4 "two open runs" fixture
+                                     replaced: two open runs are now
+                                     impossible; a later run still can't
+                                     re-link
+  docs/architecture/vleeds-data-model.md   §3f, entity map, delivery order
+  docs/product/vleeds-lead-core.md, vleeds-company-enrichment.md,
+  docs/providers/hunter.md (§8 Domain Search + smoke test)
+NOT modified: earlier migrations, Today, roles/permissions, suppression
+rules, shell/navigation, design tokens, Settings.
+
+
+--------------------------------------------------------------------------------
+4. MIGRATION / SCHEMA (20261013000000_contact_discovery_hunter.sql)
+--------------------------------------------------------------------------------
+  - F1 index: company_enrichment_runs_one_open_per_candidate (§5).
+  - contact_discovery_runs:
+      · company (composite FK, cascade); ICP + revision (composite FK, set
+        null)
+      · provider; domain (normalized); status
+        (draft|searching|review|completed|cancelled|failed)
+      · selected_titles jsonb (≤ 10, ≤ 4 KB); decision_maker_only;
+        requested_limit 1–10
+      · trigger-maintained counts (result/selected/dismissed/saved; no
+        grant); error_code; timestamps
+  - contact_discovery_candidates:
+      · minimal professional fields, verification/confidence, source summary
+      · role_match, match_state, matched/committed contact,
+        decision + selected_action, commit_result
+  - provider_usage_events: + contact_discovery_run_id, company_id
+    (composite FKs).
+  - commit_contact_candidate(workspace, candidate, contact, evidence):
+    SECURITY INVOKER, idempotent per candidate, calls ingest_lead.
+CHECKs:
+  - revision needs profile; criteria needed; failed ⇒ code; final ⇒ time
+  - normalized email lower-case/shaped; https profiles; bounded text
+  - existing/duplicate/conflict ⇒ matched contact
+  - conflict ⇒ never selected; selected ⇔ action; the action fits the match
+  - committed ⇔ contact
+Triggers:
+  - run final states frozen
+  - candidates only inserted while searching, changed while review, frozen
+    once saved
+  - an existing/duplicate match must be at the candidate's company
+  - decided_by/at stamped; counts; updated_at; immutable keys
+Indexes:
+  runs        (company_id, created_at desc) · (workspace_id, created_at desc)
+  candidates  UNIQUE (run, normalized_email) · (run, position) ·
+              (matched_contact_id) WHERE NOT NULL
+  usage       (contact_discovery_run_id)
+Not added (no query uses them): (workspace_id, status) on runs,
+(workspace_id, normalized_email) on candidates.
+RLS: members select/insert/update; nothing for anon; no deletes;
+column-level grants.
+
+
+--------------------------------------------------------------------------------
+5. P1-E4 OPEN-RUN CORRECTION (F1 closed)
+--------------------------------------------------------------------------------
+  - DB: a partial unique index on company_enrichment_runs
+    (discovery_candidate_id) WHERE NOT NULL AND status NOT IN
+    (completed, cancelled). A failed run counts as open (it can be
+    retried); historical finished runs coexist.
+  - App: startEnrichment for a discovery reference first returns the
+    existing open run (openEnrichmentRunForCandidate). If a concurrent start
+    wins the race (23505), it re-reads and returns that run.
+  - Tests: DB test (second open → 23505, also while failed; allowed after
+    cancel). The P1-E4 suite's old two-open-runs fixture became "a later
+    run can't re-link".
+
+
+--------------------------------------------------------------------------------
+6. CONTACTDISCOVERYPROVIDER ABSTRACTION
+--------------------------------------------------------------------------------
+  - providerKey, label, isConfigured(), getCapabilities(),
+    searchCreditEstimate(), searchContacts(input), normalizeCandidate(raw)
+  - Capabilities: contactDiscovery, titleFiltering, seniorityFiltering,
+    departmentFiltering, decisionMakerFiltering, returnsProfessionalEmail,
+    returnsPhoneSometimes, returnsLinkedInSometimes, usageCredits,
+    maxResults 10, maxTitles 10
+  - Input: {domain, titles[], decisionMakerOnly, limit, seniority?,
+    department?}
+  - Output: candidates, skipped count, usage (estimated credits). Hunter
+    shapes never leave contact-discovery/hunter/ (guard test).
+
+
+--------------------------------------------------------------------------------
+7. HUNTER DOMAIN SEARCH ADAPTER
+--------------------------------------------------------------------------------
+  - GET /v2/domain-search through the shared P1-E4 client: X-API-KEY header
+    (never in the URL), 10 s timeout, one bounded retry for network/5xx/
+    timeout only, same status mapping (400/401/403/429/451/5xx).
+  - Error bodies are never read.
+  - Params: domain, type=personal, limit ≤ 10, offset 0, job_titles (≤ 10,
+    commas stripped), decision_maker=true only on request; seniority/
+    department only from Hunter's lists.
+  - An empty answer (200, no emails) or a 404 means "no results".
+  - Mapping: §12. Not called: Email Verifier, Email Finder,
+    Email/Combined Enrichment, Multi-Domain Search.
+
+
+--------------------------------------------------------------------------------
+8. HUNTER CONFIGURATION
+--------------------------------------------------------------------------------
+Same server environment as P1-E4: HUNTER_API_KEY (never NEXT_PUBLIC_; that
+name is ignored, unit-tested) and the dev-only loopback HUNTER_API_ENDPOINT
+(refused on production deployments). Without a key the drawer says "Contact
+discovery is not configured yet."; P1-E4 behaviour is unchanged
+(browser-verified). The key is absent from client assets (bundle scan +
+browser check).
+
+
+--------------------------------------------------------------------------------
+9. COMPANY / DOMAIN REQUIREMENT
+--------------------------------------------------------------------------------
+The server re-reads the company (active, this workspace), its stored
+primary_domain and its company-level restriction.
+  - No domain: "Add or enrich this company with a domain before finding
+    contacts." The existing Enrich company action is shown alongside. The
+    two credit operations are never chained.
+  - Restricted: "This company is marked do not contact." No search; owners
+    keep Lift restriction.
+Both rules are checked on every action (start, retry, save).
+
+
+--------------------------------------------------------------------------------
+10. ICP ROLE INTEGRATION
+--------------------------------------------------------------------------------
+  - Default ICP preselected; any active profile selectable. The run stores
+    icp_profile_id + icp_revision and the titles used.
+  - Roles: ordered primary → secondary → fallback, then configured order;
+    distinct titles; first 10 preselected; the user includes/excludes per
+    search (unticked beyond 10 are disabled).
+  - The ICP is never edited from the sheet.
+  - No roles / no profile: typed titles (one per line, ≤ 10, this search
+    only) + "Configure decision-maker roles in Settings to reuse them
+    automatically."
+  - No AI or invented titles. The server rebuilds the title list from role
+    ids + typed titles; the browser's role text isn't trusted.
+
+
+--------------------------------------------------------------------------------
+11. SEARCH REQUEST MODEL
+--------------------------------------------------------------------------------
+Browser → {companyId, icpProfileId|null, roleIds[], manualTitles[],
+decisionMakerOnly} (Zod, strict, UUIDs, ≤ 10 titles × 200 chars).
+Server → company/ICP re-read → buildTargetTitles → run → one provider call
+{stored domain, titles, decisionMakerOnly, limit 10}. A title search with no
+results offers "Edit target roles" / "Search only Hunter-classified decision
+makers" / try later, each an explicit new search (unit-tested: one request
+per search).
+
+
+--------------------------------------------------------------------------------
+12. CONTACT CANDIDATES
+--------------------------------------------------------------------------------
+Stored per candidate:
+  - name (first/last/full), title, email + normalized email
+  - phone (shape-checked), https profile URL
+  - Hunter seniority, department, decision-maker flag
+  - verification status, confidence 0–100, source count + last-seen date
+  - role match, match state, matched contact, decision/action, save result
+Not stored: raw payload, source URLs/pages, twitter, organization/pattern,
+generic inboxes. Results without a name or usable email are skipped and
+counted ("1 result was not shown"). provider_external_id stays NULL
+(Domain Search has no stable person id; none invented). Max 10 per search.
+
+
+--------------------------------------------------------------------------------
+13. ROLE MATCHING
+--------------------------------------------------------------------------------
+  - Normalize: NFKC, lower-case, punctuation → spaces, collapsed whitespace.
+  - Whole-word containment ("Senior Operations Manager" ⊇ "operations
+    manager"; "Operations Managerial" ⊉).
+  - Highest priority wins.
+  - Labels: Primary / Secondary / Fallback / Search title match;
+    otherwise "No configured-title match"; plus "Hunter decision maker" and
+    "Executive seniority". No numeric score.
+Order:
+  1 primary  2 secondary  3 fallback  4 typed-title
+  5 Hunter-classified decision makers  6 others
+  Within a group the provider's order is kept (confidence is shown, not
+  used for sorting).
+
+
+--------------------------------------------------------------------------------
+14. VERIFICATION / CONFIDENCE
+--------------------------------------------------------------------------------
+  - Email status shown as Hunter reported it: Valid / Accept-all / Unknown /
+    Invalid, or "Not provided" (any other value). Never upgraded.
+  - No Email Verifier call.
+  - Confidence: "Confidence N" (0–100, else —), text not colour, labelled
+    "Hunter confidence".
+  - The sheet states that both describe the email, not the role fit; they
+    are never combined.
+
+
+--------------------------------------------------------------------------------
+15. DEDUPLICATION
+--------------------------------------------------------------------------------
+The P1-E1/P1-E2 contact rules (dedupe.matchContact + a workspace email
+lookup), in order:
+  1 email at this company → existing_contact
+  2 email at another company → conflict
+  3 same normalized name at this company → possible_duplicate
+  4 otherwise new
+Provider identity: none exists for Domain Search. Phone is never used
+(unit-tested). No second algorithm.
+
+
+--------------------------------------------------------------------------------
+16. EXISTING-CONTACT HANDLING
+--------------------------------------------------------------------------------
+  - "Existing contact: <name>": Select → merge with the P1-E2 conservative
+    contact merge (fill empty fields; differing values kept and reported as
+    "Kept existing job title …"; never renamed), plus Hunter evidence.
+  - Possible duplicate: explicit "Same person" (merge) or "Add as new"; never
+    a silent merge. Browser-verified: Sam Ortiz merged, the empty email was
+    filled, no second contact.
+
+
+--------------------------------------------------------------------------------
+17. CROSS-COMPANY CONFLICTS
+--------------------------------------------------------------------------------
+"Contact already belongs to another company (<company>)". Dismiss only.
+  - DB CHECK forbids selecting a conflict.
+  - commit_contact_candidate refuses a new contact whose email exists
+    anywhere in the workspace (23505) and only merges into the matched
+    contact.
+Verified (DB + browser read-back): the other company's contact was not
+moved.
+
+
+--------------------------------------------------------------------------------
+18. SUPPRESSION BEHAVIOUR
+--------------------------------------------------------------------------------
+  - Do-not-contact company: no search and no save (server-checked).
+  - A restricted existing contact is labelled "Restricted" and stays
+    restricted when enriched with evidence/empty fields (browser-verified).
+  - Lift permissions are unchanged (owner/admin).
+  - Nothing becomes "outreach-ready"; no outreach exists.
+
+
+--------------------------------------------------------------------------------
+19. CONTACT COMMIT
+--------------------------------------------------------------------------------
+"Save N contacts" processes selected, unsaved candidates in presentation
+order, each through commit_contact_candidate → ingest_lead (one transaction
+per person):
+  - create: P1-E2 contact columns; the first new contact becomes primary
+    only if the company has none
+  - merge: P1-E2 merge patch
+  - seniority: only Hunter "executive" maps to the Vleeds hint;
+    junior/senior stay evidence
+  - phone/profile: saved only when the person is selected, through the
+    lead-core contact schema (an invalid phone is dropped)
+Repeat saves are no-ops (DB-tested). The run completes when every selected
+person is saved; a failure keeps it in review with a fixed note.
+
+
+--------------------------------------------------------------------------------
+20. HUNTER SOURCE EVIDENCE
+--------------------------------------------------------------------------------
+lead_sources with subject contact, source_kind api, provider_key hunter, no
+external id. Per non-empty value:
+  contact.name, .title, .email, .phone, .linkedin, .seniority (Hunter's
+  value), .department, .verification_status, .provider_decision_maker
+No company evidence; no payloads; no source URLs. Labels were added to the
+known field list, and the drawer shows "API (hunter)" (browser-verified).
+
+
+--------------------------------------------------------------------------------
+21. PROVIDER USAGE
+--------------------------------------------------------------------------------
+One provider_usage_events row per search: hunter / domain_search,
+request_count (incl. retry), result_count (kept candidates), status,
+estimated_credit_millis, credit rule text, workspace, company, contact run.
+No key, payload or person data (browser read-back). The Discover "Company
+data" panel shows:
+  "Hunter this month — Company enrichment … · Decision-maker searches N
+  searches · estimated Y credits · Total estimated Hunter credits Z"
+  + "Your Hunter account is the authoritative balance"
+No plan allowance is coded.
+
+
+--------------------------------------------------------------------------------
+22. CREDIT ESTIMATES
+--------------------------------------------------------------------------------
+Domain Search:
+  1–10 emails returned      1000 (one credit)
+  none / error              0
+  unreadable success        NULL
+Counted on what Hunter returned, even if Vleeds skips some. The rule is
+provider metadata (contact-discovery/hunter/usage.ts). Shown as "Find
+decision makers · estimated up to 1 credit" before the request and
+"Estimated Hunter credits used" afterwards.
+
+
+--------------------------------------------------------------------------------
+23. COMPANY DRAWER INTEGRATION
+--------------------------------------------------------------------------------
+Contacts section: Add contact + "Find decision makers" (or the calm reason:
+not configured / no domain / do not contact), then "Last search: N contacts
+found · M saved · ICP: <name> · <status> · <date>". The sheet's stages:
+  Search setup → Review contacts → Save contacts → Result
+Saved contacts appear in Contacts after the save (server refresh), and their
+evidence under Sources. No separate dashboard; Today unchanged.
+
+
+--------------------------------------------------------------------------------
+24. RESPONSIVE BEHAVIOUR
+--------------------------------------------------------------------------------
+Verified at 1440, 390 and 360 in the browser.
+  - The review table is shown at lg+ (≥ 1024) in a wider sheet; below lg
+    (768, phones) candidates are cards. 1280 uses the lg layout; 768 the
+    card layout.
+  - Target-role rows ≥ 44px and fit; emails wrap (break-all); selection
+    buttons ≥ 44px on phones; Save stays reachable.
+  - The sheet and page have no horizontal overflow; bottom navigation is
+    unchanged.
+
+
+--------------------------------------------------------------------------------
+25. ACCESSIBILITY
+--------------------------------------------------------------------------------
+  - Role checkboxes are labelled, in a fieldset with a legend and hint
+    (aria-describedby).
+  - The results table has a caption; mobile cards are a labelled <ul>.
+  - Decision groups are labelled; button names include the person.
+  - Role match, email status, confidence and existing state are text.
+  - Searching/results/decisions are announced (role=status); errors use
+    role=alert.
+  - The step list uses aria-current; focus moves to each stage heading.
+  - The modal <dialog> traps and restores focus; nested in the mobile drawer
+    dialog like Add contact.
+  - Targets are ≥ 44px on phones.
+Not done: an axe audit / screen-reader pass (carried).
+
+
+--------------------------------------------------------------------------------
+26. TESTS ADDED
+--------------------------------------------------------------------------------
+A. tests/unit/contact-discovery.test.ts: 28 tests (network mocked)
+   - registry; configured/unconfigured; NEXT_PUBLIC_ ignored; capabilities;
+     1-credit estimate
+   - request: path, X-API-KEY, domain, type=personal, job_titles,
+     limit ≤ 10, offset 0, no key in the URL
+   - decision_maker only on request; 10-title cap; comma stripping;
+     seniority/department lists
+   - no-criteria refusal without a request; exactly one request (no
+     pagination/fallback)
+   - mapping: skips nameless/duplicate/generic; full field mapping;
+     confidence bounds; verification states; https-only profiles; phone;
+     seniority/department context; no raw payload; malformed → unknown
+     credit
+   - credits 1–10 → 1000, none → 0; errors (429/403/400/401/451) without
+     retry; bounded retry counted; timeout; key never in results; messages
+   - ICP titles: order, de-dup, 10 cap, chosen ids, typed titles; input
+     validation
+   - role matching: whole words, priority, decision maker, search titles;
+     labels; ordering
+   - matching: existing / conflict / possible duplicate / new; phone
+     ignored; decisions per state
+   - commit planning: lead-core normalization; seniority mapping;
+     create/merge; evidence keys; provider seniority evidence
+B. tests/db/contact-discovery.test.ts: 14 tests (PGlite)
+   - RLS/anon/deletes; runs workspace-only; members create for own
+     companies (created_by)
+   - company + ICP in the run's workspace; revision/criteria/title-count
+     CHECKs
+   - immutable criteria/counts; final runs frozen; status CHECKs
+   - candidates: no payload columns; workspace-only; run's company/
+     workspace FK; insert only while searching; one per email; normalized
+     email rules; existing match at this company only; foreign matches
+     refused
+   - conflicts not selectable; action must fit; decided_by stamped; counts
+   - commit: creates the contact with Hunter evidence (no external id);
+     candidate saved; saved_count; idempotent repeat; saved candidates
+     frozen
+   - merge only into the matched contact; a new contact refused if its email
+     exists anywhere; the other company's contact not moved; conflict/
+     unselected/foreign refused; run not in review refused
+   - usage links to own runs/companies only; append-only
+   - P1-E4 F1: one open enrichment run per reference (also while failed;
+     allowed after cancel)
+   Mutation check: a temporary migration dropped the conflict CHECK, the
+   candidate guard, the F1 index, the run→company FK and the run guard.
+   Result: 7/14 FAILED (every break detected). The file was deleted and
+   verified absent.
+C. Business-agnostic guard: "hunter.io" only in the Hunter adapter folders,
+   the review scripts and the bundle check; domain-search only in the
+   contact adapter; P1-E5 fixture names banned from runtime code.
+D. scripts/ui-review/review-contacts.mjs: 78 checks (§27).
+
+
+--------------------------------------------------------------------------------
+27. TEST RESULTS (final code)
+--------------------------------------------------------------------------------
+npm.cmd run verify ........................ EXIT 0
+  lint .................................... PASS
+  typecheck ............................... PASS
+  vitest .................................. PASS 15 files, 403/403
+      DB (PGlite): tenancy 36 · icp 41 · lead core 40 · imports 20 ·
+                   discovery 18 · enrichment 17 · contact discovery 14
+      unit: 217 (incl. contact discovery 28, enrichment 35,
+            business-agnostic 4)
+  build (Next.js 16.4.0) .................. PASS
+  check:bundle ............................ PASS (HUNTER_API_KEY / endpoint
+                                            names and values, api.hunter.io,
+                                            provider paths absent; no
+                                            fixtures)
+Contact-discovery mutation check .......... PASS (7/14 failed when broken)
+Browser (production build + fresh mock each; MOCKED provider, fictional data):
+  P1-E5 review-contacts.mjs configured .... PASS 72/72
+  P1-E5 review-contacts.mjs unconfigured .. PASS 6/6
+  P1-E4 review-enrichment.mjs ............. PASS 62/62 + 8/8 (regression)
+  P1-E3 review-discover.mjs ............... PASS 57/57 + 8/8 (regression)
+  P1-E2 review-imports.mjs ................ PASS 81/81 (regression)
+  P1-E1 review-leads.mjs .................. PASS 40/40 (regression)
+  S2 review-settings.mjs .................. PASS 66/66 (regression)
+  S1A review.mjs .......................... PASS 50/50 (regression)
+Business-agnostic guard ................... PASS
+Provider mocks in production .............. none
+HUNTER_API_KEY in browser assets .......... absent
+Real Supabase/Postgres .................... NOT RUN — STILL OPEN
+
+P1-E5 browser checks cover:
+  - not configured (drawer message; P1-E4 unchanged; 360)
+  - no domain (reason + Enrich company); restricted company (reason + Lift)
+  - Find decision makers → setup: company, domain, default ICP; roles with
+    priority labels in order; deselect; DM toggle off; credit label/copy;
+    no remaining balance
+  - search → 9 rows (≤ 10; nameless skipped and explained); exact group
+    order; columns; caption
+  - primary/secondary/fallback/decision-maker labels; Valid / Accept-all /
+    Unknown; confidence
+  - existing contact; restricted existing; possible duplicate (explicit
+    choice); cross-company conflict (no select)
+  - nothing preselected; select / dismiss / undo; "Selected · add to …";
+    "Save 5 contacts"
+  - result (2 new, 3 updated, evidence, 1 credit); the drawer shows the new
+    contacts, the merged duplicate (email filled), the restriction kept,
+    Hunter evidence, the last search, the saved phone
+  - decision-makers-only search → 1 result → "Save 1 contact"
+  - usage (2 searches · estimated 2 credits; total)
+  - typed titles without an ICP (Settings pointer); no-titles message; no
+    results + alternatives (0 credits); quota (calm); temporary failure →
+    explicit Try again → results
+  - 390/360: roles fit (≥ 44px), cards, ≥ 44px controls, no sheet/page
+    overflow, save reachable, result, mobile error, bottom nav
+  - stored data: no payload, no invented ids, run has ICP id + revision +
+    titles, one Sam Ortiz, cross-company contact not moved, usage rows with
+    run/company/credits
+  - the browser never calls the provider or Supabase; the key never reaches
+    the browser
+
+
+--------------------------------------------------------------------------------
+28. LIVE HUNTER DOMAIN SEARCH STATUS
+--------------------------------------------------------------------------------
+LIVE HUNTER DOMAIN SEARCH:
+NOT RUN
+(HUNTER_API_KEY is not configured.) This is acceptable for P1-E5 and is not
+part of the quality gate. The procedure (deliberate, may use one credit;
+record only success, count, filters and estimated credit) is in
+docs/providers/hunter.md §8.
+
+
+--------------------------------------------------------------------------------
+29. CODE-QUALITY REVIEW
+--------------------------------------------------------------------------------
+Verified
+  Q1  Contact-provider abstraction: actions/service/DAL/UI use types.ts +
+      registry only.
+  Q2  Hunter isolation: Domain Search shapes, path and credit rule live in
+      contact-discovery/hunter/. The HTTP client/auth/timeout/retry/status
+      mapping are reused from P1-E4 (not duplicated). Guard tests.
+  Q3  ICP title use: only configured roles (re-read by id) or typed titles;
+      ordered, ≤ 10, never written back; revision recorded.
+  Q4  Company/domain re-read: the stored normalized domain and restriction
+      are re-read on start/retry/save; the browser sends ids only.
+  Q5  Contact dedupe reuse: matchContact + email owner lookup; P1-E2 merge
+      planner; lead-core contact schema.
+  Q6  Cross-company email: never selectable (CHECK), never created or moved
+      (function check), shown with the other company's name.
+  Q7  Suppression: no search/save for do-not-contact companies;
+      restrictions untouched.
+  Q8  Data minimization: an allow-list mapper; nameless/generic skipped; no
+      payload/source URLs; external id NULL (not invented).
+  Q9  Candidate persistence: staging only; frozen after save; idempotent
+      commit per candidate.
+  Q10 Evidence: contact-subject, provider-keyed, non-empty only; no company
+      evidence.
+  Q11 Usage estimates: generic column; rule as metadata; unknown ≠ 0;
+      estimates labelled.
+  Q12 Provider failures: categories → fixed messages; bounded retry only
+      for transient errors; explicit retry only.
+  Q13 Client/server boundary + bundle: server-only registry; view models
+      only; bundle scan + browser checks.
+  Q14 P1-E4 F1: DB index + app-level reuse of the open run (incl. race).
+Follow-ups
+  F1 (Low)  A partially failed save leaves the run in review; Save again is
+            safe (idempotent), but there is no per-person retry button.
+  F2 (Low)  Usage totals still sum monthly events in memory (carried).
+  F3 (Low)  The latest search shown in the drawer counts all runs, including
+            cancelled ones (status shown).
+  F4 (Info) Seniority/department filters exist in the adapter but aren't
+            exposed in the UI (kept small).
+  F5 (Info) "Search more" (offset > 0) is out of scope; a later story should
+            add it with explicit credit visibility.
+  F6 (Info) Carried: no CSP; forbidden pages return HTTP 200;
+            my_workspace_ids() RLS helper planned.
+
+
+--------------------------------------------------------------------------------
+30. CANONICAL-DESIGN DEVIATIONS
+--------------------------------------------------------------------------------
+No redesign. Reused: ConfigSheet, Field, inputClass, Button, StatusPill,
+Alert, the radio/checkbox card pattern from the import compare sheet and
+P1-E4, the table/card pattern, the drawer sections.
+  D1 The drawer's Contacts section gains "Find decision makers" under Add
+     contact, plus a one-line last search.
+  D2 ConfigSheet gains an optional `wide` size (≤ 1040px on sm+) used only
+     by the contact review/result stages, so the 8-column table fits;
+     phones are unchanged (bottom sheet).
+  D3 The Discover usage panel shows a small breakdown (company enrichment ·
+     decision-maker searches · total) instead of one line.
+
+
+--------------------------------------------------------------------------------
+31. UNRESOLVED ISSUES
+--------------------------------------------------------------------------------
+  U1  PRE-PRODUCTION BLOCKER — REAL SUPABASE VERIFICATION STILL OPEN
+      (186 DB tests only on PGlite).
+  U2  LIVE HUNTER DOMAIN SEARCH NOT RUN. Also open: live Hunter
+      enrichment / Google Places tests (no keys).
+  U3  Browser checks use the UI-review mock (fake Supabase + fictional
+      provider). The mock does not emulate Hunter's title matching.
+      Constraints are proven in tests/db; the adapter in unit tests.
+  U4  database.types.ts is still hand-maintained (+2 tables, 1 function).
+  U5  F1–F5 above.
+  U6  No axe audit / screen-reader pass (carried).
+  U7  1280/768 were not screenshotted separately (they share the lg / below-
+      lg layouts verified at 1440 and 390).
+  U8  Carried: HTTP 200 for forbidden pages; no CSP.
+
+
+--------------------------------------------------------------------------------
+32. SCREENSHOTS (docs/reports/screenshots/P1-E5/)
+--------------------------------------------------------------------------------
+Production build + UI-review mock + MOCKED provider with fictional people.
+  01-contact-discovery-not-configured-desktop.png  no HUNTER_API_KEY
+  02-find-decision-makers-desktop.png       drawer action
+  03-contact-search-setup-desktop.png       ICP, roles + priorities, one
+                                            deselected, DM toggle, credit
+  04-contact-results-desktop.png            table, labels, status,
+                                            confidence, states
+  05-contact-role-matches-desktop.png       secondary / fallback / decision
+                                            maker rows
+  06-contact-existing-match-desktop.png     existing + restricted
+  07-contact-possible-duplicate-desktop.png same name, explicit choice
+  08-contact-selected-desktop.png           selected/undo, Save 5 contacts
+  09-contact-save-result-desktop.png        created/updated/evidence/credits
+  10-contact-usage-desktop.png              Discover usage breakdown
+  11-contact-provider-error-desktop.png     quota message
+  12-contact-search-mobile.png              390 setup
+  13-contact-results-mobile.png             390 cards
+  14-contact-selected-mobile.png            390 selected
+  15-contact-save-result-mobile.png         390 result
+  16-contact-error-mobile.png               390 quota message
+
+
+--------------------------------------------------------------------------------
+33. EXACT RECOMMENDED NEXT STORY
+--------------------------------------------------------------------------------
+First, still: close U1 (enable virtualization + Docker, then supabase start,
+db reset, db:types, SUPABASE_TEST_DB_URL test:db, verify). Optionally run the
+live Hunter/Google smoke tests once keys exist.
+
+Then, with explicit approval only:
+P1-E6 — ICP Evaluation + Lead Scoring:
+  - use the stored company/contact data and the saved ICP to compute a
+    transparent fit:
+      · company criteria, geography, decision-maker coverage (P1-E5
+        contacts × ICP roles)
+      · buying signals where evidence exists, exclusions
+      · weighted score + A/B/C grade from scoring_model
+  - a breakdown/explanation pinned to profile id + revision; stale/re-score
+    on ICP changes
+  - Today queue, calling, dispositions and follow-ups come after scoring
+
+P1-E5 stops here. No Multi-Domain Search, Email Finder, Email Verifier,
+Email/Combined Enrichment, Apollo, scoring, calling, SMS, email sequences or
+campaign work has been started. The canonical UI remains locked.
+================================================================================

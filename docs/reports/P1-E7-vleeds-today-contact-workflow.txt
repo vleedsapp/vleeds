@@ -1,0 +1,840 @@
+================================================================================
+VLEEDS — COMPLETION REPORT
+Story:   P1-E7 — Today Queue + Manual Contact Workflow
+Date:    2026-10-10
+Status:  COMPLETE (development verification on embedded Postgres/PGlite).
+
+  ******************************************************************
+  *  REAL SUPABASE PRE-PRODUCTION VERIFICATION: STILL OPEN          *
+  *  All nine DB suites (219 tests, incl. the new contact-workflow  *
+  *  suite and the extended scoring suite) have run ONLY on PGlite  *
+  *  with the Supabase shim, never on a real Supabase/Postgres      *
+  *  stack. Docker is still unavailable on this machine.            *
+  *  Mandatory gate before production.                              *
+  ******************************************************************
+
+  P1-E7 PROVIDER CALLS: NONE
+    - No Google, Hunter, Apollo, calling, email or SMS calls.
+    - The only external action is a tel: link the user's own phone or
+      system handles; Vleeds makes no request for it.
+    - Browser review: provider usage stayed at 0 throughout.
+
+  Live Google/Hunter smoke tests: still not run (no keys). They are not
+  needed for this story.
+
+  Note on the spec: the pasted P1-E7 text was cut off at report item
+  "12. Toda…". Sections 12–31 follow the P1-E6 report structure and cover
+  every remaining topic the spec listed.
+================================================================================
+
+CONTENTS
+  1 Summary                          17 Contacted today
+  2 Files created                    18 Activity timeline
+  3 Files modified                   19 Refresh lead scores (batch)
+  4 Migration / schema               20 Suppression enforcement
+  5 P1-E6 score-write hardening      21 Qualification / scoring separation
+  6 Workspace timezone               22 Responsive behaviour
+  7 Contact attempts                 23 Accessibility
+  8 Dispositions                     24 Tests added
+  9 Follow-up tasks                  25 Test results
+ 10 Transactional attempt workflow   26 Bundle review
+ 11 Do-not-contact behaviour         27 Code-quality review
+ 12 Today queue                      28 Canonical-design deviations
+ 13 Ready-to-contact eligibility     29 Unresolved issues
+ 14 Recommended contact              30 Screenshots
+ 15 Due work and blocked tasks       31 Exact recommended next story
+ 16 Needs attention
+
+
+--------------------------------------------------------------------------------
+1. SUMMARY
+--------------------------------------------------------------------------------
+Vleeds is now usable for daily selling. Today answers "what should I do now?"
+from real data:
+  - callbacks due and follow-ups due, labelled Overdue / Due now / Later today
+  - companies ready to contact: current A/B grade for the default ICP, each
+    with one recommended contact
+  - the attempts recorded today
+  - a compact Needs attention area
+
+The seller calls from their own phone and records the outcome in Vleeds:
+  - "Call" / "Start contact" opens a focused sheet with Copy number and Call
+    on device (a tel: link).
+  - Nothing is recorded until an outcome is submitted.
+  - Each outcome is one database transaction: the attempt, completion of the
+    source task, the next task, and (for Do not contact only) the
+    restriction.
+  - Each contact has at most one open next action. Tasks can be scheduled,
+    rescheduled, completed without a call, or cancelled.
+  - The company drawer gains per-contact next actions and an Activity
+    timeline.
+  - Workspace time zone (IANA, default UTC) defines "today".
+
+The P1-E6 medium follow-up is closed. Scores can no longer be persisted by
+the authenticated API role: a server-only trusted writer (the only use of
+SUPABASE_SERVICE_ROLE_KEY) calls save_lead_score_trusted, which still
+checks the acting member, revision, fingerprint and thresholds.
+
+A small explicit batch, "Refresh lead scores" (≤ 50 unscored/outdated
+companies), uses the same evaluator and writer.
+
+No calling provider, email, SMS, campaigns, automated follow-up, AI scoring
+or background jobs.
+
+Quality gate: npm.cmd run verify EXIT 0 (see §25). Browser review P1-E7:
+72/72; all earlier reviews pass (§25).
+
+
+--------------------------------------------------------------------------------
+2. FILES CREATED
+--------------------------------------------------------------------------------
+Database
+  supabase/migrations/20261015000000_today_contact_workflow.sql
+Workflow domain (src/lib/contact-workflow/; pure, no I/O)
+  types.ts         dispositions, task kinds/statuses, fact types
+  dispositions.ts  labels, per-outcome rules, outcomeProblem()
+  eligibility.ts   company/contact Ready eligibility, callable contact,
+                   task blockers
+  queue.ts         recommended contact, Ready queue (order, limit), due
+                   classification/order
+  time.ts          workspace day bounds, local date/time ↔ UTC, labels
+                   (@date-fns/tz)
+  view.ts          strict browser input schemas, view models, tel: helper
+Configuration
+  src/lib/config/timezone.ts  IANA list from the runtime (Intl), validation,
+                              default UTC
+Server
+  src/lib/supabase/trusted-score-writer.ts
+      server-only; the ONLY service-role use; calls one function
+  src/lib/dal/contact-workflow.ts
+      record/schedule/reschedule/complete/cancel; drawer workflow + activity
+  src/lib/dal/today.ts
+      Today view model (ready, due, contacted today, attention)
+  src/app/w/[workspaceId]/today/actions.ts
+      loadContactSheet, recordContactOutcome, scheduleTask, rescheduleTask,
+      completeTask, cancelTask, refreshLeadScores
+UI
+  src/components/workflow/contact-sheet.tsx
+      Start contact / log outcome sheet + Call button
+  src/components/workflow/task-controls.tsx
+      Schedule follow-up, Reschedule, Complete, Cancel
+  src/components/workflow/sheet-host.tsx
+      keeps sheets mounted when their row leaves the list after refresh
+  src/components/today/today-board.tsx
+      Lead Queue table/cards, due lists, Contacted today, Needs attention,
+      Refresh lead scores
+Tests and tooling
+  tests/unit/contact-workflow.test.ts   26 unit tests
+  tests/db/contact-workflow.test.ts     19 DB tests (PGlite)
+  scripts/ui-review/review-today.mjs    72 browser checks, screenshots 01–18
+Docs
+  docs/product/vleeds-contact-workflow.md
+  docs/product/vleeds-today.md
+  docs/reports/P1-E7-vleeds-today-contact-workflow.txt (this file)
+  docs/reports/screenshots/P1-E7/*.png (18)
+Dependencies (maintained timezone utilities)
+  date-fns 4.4.0, @date-fns/tz 1.5.0
+
+
+--------------------------------------------------------------------------------
+3. FILES MODIFIED
+--------------------------------------------------------------------------------
+Scoring
+  src/lib/dal/scoring.ts
+      saveLeadScore → trusted writer (actor = session user)
+      + evaluateAndSaveFit (shared by Evaluate fit and the batch)
+      + companiesNeedingEvaluation
+  src/app/w/[workspaceId]/leads/scoring-actions.ts
+      uses evaluateAndSaveFit; "writer not configured" message
+  src/lib/scoring/decision-maker-fit.ts
+      extracted bestRoleFor() (same matching; reused by the Ready queue)
+Workspace / timezone
+  src/lib/dal/workspaces.ts            timezone read + update
+  src/lib/config/business-profile.ts
+      timezone field; optionalText accepts null (FIX, see below)
+  src/components/settings/business-profile-editor.tsx
+      Time zone select (runtime list)
+  src/app/w/[workspaceId]/settings/page.tsx
+      "Time zone" row; passes it to the editor
+Today and drawer
+  src/app/w/[workspaceId]/today/page.tsx      real data (was truthful zeros)
+  src/components/today/summary-cards.tsx
+      OperationalSummaryCards (canonical cards, real metrics); each value
+      carries its label for screen readers
+  src/components/today/today-queue.tsx
+      tabs passed in (defaults = canonical fixture tabs), initial tab, empty
+      actions
+  src/components/leads/company-drawer.tsx
+      per-contact next action + Activity section, in a sheet host
+  src/app/w/[workspaceId]/leads/page.tsx      loads companyWorkflow for the
+                                              open drawer
+Plumbing
+  src/lib/dal/index.ts                 exports
+  src/lib/supabase/database.types.ts
+      timezone, scored_by, 2 tables, 7 functions, trusted writer
+  src/lib/env.ts, src/lib/supabase/server.ts
+      comments: the one service-role path
+  scripts/check-client-bundle.mjs
+      + save_lead_score_trusted / persistLeadScore patterns (key name was
+      already checked)
+  .env.example                         SUPABASE_SERVICE_ROLE_KEY documented
+Review harness
+  scripts/ui-review/mock-supabase.mjs
+      trusted writer (service key only), workflow RPCs, Today reads, timezone,
+      count=exact, lt. filter, opt-in MOCK_TODAY fixtures, review
+      introspection
+  scripts/ui-review/review.mjs
+      S1A zero-count check reads the number (the value now includes its
+      sr-only label)
+Tests adapted
+  tests/db/scoring.test.ts
+      persistence through the trusted role; new access tests
+  tests/unit/icp-config.test.ts
+      business profile now includes timezone; null re-validation regression
+Docs
+  docs/architecture/vleeds-data-model.md   §3h, status line, planned-entity
+                                           note, delivery order
+  docs/architecture/vleeds-tenancy.md      the single service-role path
+  docs/product/vleeds-lead-scoring.md      §9a trusted score persistence
+  docs/product/vleeds-lead-core.md         enforcement, permissions,
+                                           drawer, next steps
+NOT modified: earlier migrations, providers, discovery/enrichment/contact
+discovery, navigation, tokens.
+
+Pre-existing defect fixed (found while adding the time zone)
+  The business-profile editor validated locally and sent the PARSED value
+  (empty optional fields become null). The server then re-validated and
+  rejected null ("expected string"). Since S2, any workspace with an empty
+  domain or website could not save its business profile, and so could not
+  set a time zone. optionalText now treats null as empty. Regression test
+  added.
+
+
+--------------------------------------------------------------------------------
+4. MIGRATION / SCHEMA (20261015000000_today_contact_workflow.sql)
+--------------------------------------------------------------------------------
+workspaces.timezone
+  - text NOT NULL DEFAULT 'UTC'; shape CHECK (≤ 64 chars)
+  - trigger: the name must exist in pg_timezone_names
+  - grant update(timezone); owners/admins via the existing RLS policy
+lead_scores.scored_by
+  - the session user whose request produced the result
+save_lead_score (P1-E6)
+  - DROPPED; replaced by save_lead_score_trusted (§5)
+contact_attempts
+  - fields: phone channel, 9 dispositions, note ≤ 1000 (required for
+    other), attempted_at = server now(), created_by, request_id
+  - unique per workspace (request_id) → idempotent
+  - composite FKs to the contact and to the source task (same contact)
+  - select-only for API roles; an update trigger refuses edits from any
+    role
+follow_up_tasks
+  - fields: kind callback|follow_up|retry_call; status
+    open|completed|cancelled
+  - status/timestamp CHECK; notes ≤ 1000
+  - composite FKs to the contact and to the source attempt (same contact)
+  - PARTIAL UNIQUE (contact_id) WHERE status = 'open'
+  - immutable keys/kind/creator; select-only for API roles
+Indexes
+  attempts  (company_id, attempted_at desc)
+            (contact_id, attempted_at desc)
+            (workspace_id, attempted_at desc)
+  tasks     (workspace_id, due_at) WHERE open
+            (company_id, created_at desc)
+            + the partial unique index
+Functions (definer, explicit membership)
+  record_contact_attempt, schedule_follow_up, reschedule_follow_up,
+  complete_follow_up, cancel_follow_up
+  Helpers: private.contact_blocker, raise_blocker, check_due_at,
+  close_follow_up, user_is_workspace_member
+Today reads (invoker, RLS)
+  today_ready_candidates, today_due_tasks
+Error codes
+  42501 not a member / not available
+  VL001 restricted
+  VL002 not contactable (left company / no phone)
+  VL003 task not open
+  VL004 open task exists
+  22023 invalid request
+
+
+--------------------------------------------------------------------------------
+5. P1-E6 SCORE-WRITE HARDENING
+--------------------------------------------------------------------------------
+Choice: SUPABASE_SERVICE_ROLE_KEY in ONE server-only module. The repository
+had no other privileged mechanism, and supabase-js with the service key
+is the established Supabase pattern. The change is isolated to score
+persistence; there is no privileged DAL.
+  - save_lead_score_trusted(p_actor_user_id, …)
+      · EXECUTE granted to service_role only; revoked from authenticated
+        and anon
+      · it still verifies that:
+          - the actor is a member of a non-archived workspace
+          - the company and profile belong to the workspace
+          - the ICP revision is current
+          - the fingerprint equals scoring_input() now
+          - score and coverage are in range
+          - the grade follows the thresholds
+          - an exclusion has ≥ 1 named reason and no score/grade
+      · it records scored_by
+  - src/lib/supabase/trusted-score-writer.ts
+      · import "server-only"
+      · its client is private (never exported); one .rpc call, no .from()
+      · the key is read from server env only and never logged (errors log
+        the code only)
+      · a sb_publishable_ key is refused
+  - Flow: the server action authenticates the user, re-reads the canonical
+    input, runs the pure evaluator, then calls persistLeadScore(session
+    user id, …). The browser still sends only ids/choices (strict schemas,
+    tested).
+  - Without the key, Evaluate fit / Refresh say "the trusted score writer
+    isn't configured". There is no fallback path.
+  - Guards:
+      · unit tests: the module is the only reader of the key name; only
+        dal/scoring.ts and today/actions.ts import it; no "use client" file
+        references it
+      · the bundle check fails on the key name, the function name or the
+        writer
+DB tests:
+  - authenticated/anon can't execute it; service_role can; the old RPC is
+    gone
+  - a member's direct call with fabricated values → 42501
+  - non-member / outsider / null actor / foreign workspace or company →
+    42501
+  - stale fingerprint or revision → 55000
+  - inconsistent grade, bounds, an exclusion without reasons or with a
+    score → 23514
+  - direct inserts/updates of lead_scores → 42501
+Browser: a user-session call to the trusted writer is refused (mock
+mirrors the grant); Evaluate fit and Refresh work through the writer.
+
+
+--------------------------------------------------------------------------------
+6. WORKSPACE TIMEZONE
+--------------------------------------------------------------------------------
+Stored as an IANA name (default UTC; existing workspaces get UTC).
+  - Edited in Settings → Business profile → Time zone (owners/admins).
+    Members read it in the Business profile card.
+  - The choice list comes from the runtime (Intl.supportedValuesOf); there
+    is no hand-maintained list. The saved zone is kept even if a browser
+    doesn't list it.
+  - Validated server-side (runtime list) and in the database (shape +
+    pg_timezone_names).
+  - The browser zone is never stored.
+  - Timestamps stay timestamptz/UTC.
+  - The zone is used only for: today bounds, display ("Today · 10:42"),
+    reading typed date/time, and overdue/due-today classification.
+  - Conversions use @date-fns/tz (TZDate) and date-fns; no manual offset
+    arithmetic.
+  - DST: 23/25-hour days are handled. A non-existent local time moves
+    forward by the gap; this is documented and tested.
+
+
+--------------------------------------------------------------------------------
+7. CONTACT ATTEMPTS
+--------------------------------------------------------------------------------
+Append-only history (P1-E7 channel = phone).
+  - Created only by record_contact_attempt, with server now() as
+    attempted_at and created_by = the caller.
+  - No API insert/update/delete; an update trigger blocks edits even for
+    the trusted role.
+  - Opening a sheet, copying a number or a tel: link creates nothing
+    (browser-verified).
+  - Resubmitting the same form returns the same attempt (request_id).
+
+
+--------------------------------------------------------------------------------
+8. DISPOSITIONS
+--------------------------------------------------------------------------------
+Product labels:
+  No answer · Left voicemail · Connected — interested ·
+  Connected — not interested · Callback requested · Follow-up needed ·
+  Wrong number · Do not contact · Other
+Rules (pure module, enforced again in SQL):
+  - Callback/Follow-up: due date + time REQUIRED (callback / follow_up
+    task)
+  - No answer / Voicemail: optional retry_call
+  - Interested: optional follow-up
+  - Not interested / Wrong number: no next action in this step
+  - Other: note required; optional next action
+  - Do not contact: scope required (This person / Entire company)
+  - Due times must be in the future (≤ 5 years)
+Ready afterwards (no task):
+  - Not interested / Wrong number: not returned automatically
+  - Others: excluded for the rest of the workspace day only
+Nothing changes qualification, grade, fit or coverage.
+
+
+--------------------------------------------------------------------------------
+9. FOLLOW-UP TASKS
+--------------------------------------------------------------------------------
+  - One open task per contact (partial unique index). Schedule refuses a
+    second one (VL004); the drawer offers Reschedule instead.
+  - Reschedule changes due_at only (id, creator and created_at kept;
+    verified).
+  - Complete = handled without a call; no attempt is created (verified).
+  - Cancel keeps the history.
+  - Overdue / Due now / Later today / Blocked are derived, never stored.
+  - The source attempt must be the same contact's (FK).
+
+
+--------------------------------------------------------------------------------
+10. TRANSACTIONAL ATTEMPT WORKFLOW
+--------------------------------------------------------------------------------
+record_contact_attempt, in one transaction:
+  1. checks membership
+  2. replays a known request_id
+  3. locks the contact row
+  4. checks the relationship and the blocker (restricted / left / no
+     phone / archived)
+  5. checks the outcome rules
+  6. checks the source task (open, same contact)
+  7. inserts the attempt
+  8. completes the source task
+  9. replaces any other open task with the next task
+ 10. for DNC: inserts the restriction and cancels in-scope tasks
+The browser can't supply relationships, actor or timestamps (strict
+schemas; the DB re-reads everything). Browser-verified: an overdue
+callback was logged as "Callback requested". The source task completed,
+a new callback task was created, and the overdue item left Today.
+
+
+--------------------------------------------------------------------------------
+11. DO-NOT-CONTACT BEHAVIOUR
+--------------------------------------------------------------------------------
+Requires an explicit scope; an optional reason.
+  - This person: a contact restriction; that contact's open task is
+    cancelled; other contacts are untouched.
+  - Entire company: a company restriction; every open task at the company
+    is cancelled.
+  - Reuses suppression_records (any member adds; only owners/admins lift).
+  - Afterwards: no new attempts or tasks (VL001); drawer actions are
+    removed; Today shows remaining tasks as blocked.
+Allowed on a contactable record because it creates the restriction (also
+for a contact without a phone). Not allowed on an already-restricted
+target.
+
+
+--------------------------------------------------------------------------------
+12. TODAY QUEUE
+--------------------------------------------------------------------------------
+Canonical Today, real data.
+Summary cards (same four canonical cards):
+  ready to contact · callbacks due · follow-ups due · contacted today
+Work panel tabs:
+  Lead Queue · Callbacks · Follow-ups · Contacted today
+  - It opens on due work when something is due now or overdue.
+  - The header shows "Times in <zone>" and the Refresh lead scores action.
+Bounded:
+  - ready candidates ≤ 2,000 companies; shown 25 ("Showing 25 of N leads"
+    + View all Leads)
+  - due tasks ≤ 200
+  - contacted-today rows 25; the count is exact
+
+
+--------------------------------------------------------------------------------
+13. READY-TO-CONTACT ELIGIBILITY
+--------------------------------------------------------------------------------
+Company (default ICP):
+  - active
+  - CURRENT result (revision + fingerprint, the same rule as Leads)
+  - grade A or B (never C, Excluded, Outdated or Not scored)
+  - qualification unreviewed or qualified
+  - no company restriction
+Contact:
+  - not left the company; usable phone (≥ 3 digits); not restricted
+  - no open task: a future task waits; a due task is listed as due work
+  - latest outcome rule (§8)
+Order: A before B, fit desc, name, id. Coverage never reorders fit.
+The SQL returns current A/B facts; the pure module decides eligibility
+(single source of the business rules).
+
+
+--------------------------------------------------------------------------------
+14. RECOMMENDED CONTACT
+--------------------------------------------------------------------------------
+One per company, from ELIGIBLE contacts. The first match decides:
+  1. default-ICP primary role
+  2. secondary role
+  3. fallback role (bestRoleFor: the same whole-word matching as P1-E5/E6)
+  4. contact marked primary
+  5. name, then id
+If the best person is restricted, has a task or no phone, the next
+eligible one is used (browser: Willow → Lou Brandt; Harbor → Robin over
+primary contact Casey, who had a task).
+
+
+--------------------------------------------------------------------------------
+15. DUE WORK AND BLOCKED TASKS
+--------------------------------------------------------------------------------
+Open tasks with due_at < end of the workspace day.
+  - Overdue (before today's start) · Due now (≤ now) · Later today
+  - Order: overdue first, then due_at, then id
+  - Callbacks tab = callback; Follow-ups tab = follow_up + retry_call
+  - Cards show: time, state label, kind, company, contact, title, tappable
+    phone, short note, and Call / Reschedule / Complete / Cancel task
+Blocked (company/contact restricted, contact left, no phone, archived):
+  - never deleted and not counted
+  - shown under Needs attention with the reason and Cancel task
+
+
+--------------------------------------------------------------------------------
+16. NEEDS ATTENTION
+--------------------------------------------------------------------------------
+Truthful counts only, each linked to its existing workflow:
+  - outdated scores → Leads (Outdated filter)
+  - A/B companies with no callable contact → the company drawer (Add
+    contact / Find decision makers)
+  - blocked tasks → reason + Cancel task + company link
+Hidden when all are zero.
+
+
+--------------------------------------------------------------------------------
+17. CONTACTED TODAY
+--------------------------------------------------------------------------------
+Attempts with attempted_at in [workspace start, end).
+  - Copy / tel: / drawer opening never count.
+  - DB-tested at local-midnight edges in UTC, America/Chicago and
+    Asia/Kolkata.
+  - Browser: the count increments after an outcome.
+
+
+--------------------------------------------------------------------------------
+18. ACTIVITY TIMELINE
+--------------------------------------------------------------------------------
+Drawer → Activity: the most recent 30 attempts + tasks, newest first by
+when they happened.
+  - Attempts: "Today · 00:17 Do not contact · Casey Fox · by you", plus
+    note.
+  - Tasks: "Due Tomorrow · 14:00 Callback [Open/Completed/Cancelled]",
+    contact, note.
+  - Each contact shows "Last contact: … · outcome" (or Never contacted)
+    and "Next: kind · due".
+  - No internal ids.
+  - The actor is "by you" / "by a teammate" (no user directory exists yet;
+    see U5).
+
+
+--------------------------------------------------------------------------------
+19. REFRESH LEAD SCORES (BATCH)
+--------------------------------------------------------------------------------
+An explicit button in the Today header (only with a default ICP).
+  - ≤ 50 per click: unscored first, then outdated (list_companies states)
+  - the same evaluateAndSaveFit → the trusted writer; no provider calls
+  - the result line: "Evaluated N · A · B · C · Excluded", plus
+    "N more leads need evaluation"
+  - a not-evaluable profile stops with the P1-E6 message
+  - companies whose inputs changed mid-batch are skipped and reported
+No automatic scoring on page load or data change.
+Tested:
+  - DB: selection = unscored + outdated only (current/excluded skipped);
+    a new result enters Ready immediately; a hard-excluded company never
+    does
+  - browser: the trusted writer was used and provider usage was unchanged
+
+
+--------------------------------------------------------------------------------
+20. SUPPRESSION ENFORCEMENT
+--------------------------------------------------------------------------------
+Re-checked on the server and in the database for:
+  - Start contact (the sheet shows the reason; no form)
+  - log attempt
+  - schedule
+  - reschedule
+  - the next action
+Disabled buttons are not relied on: the DB returns VL001. Only Do not
+contact can act on a contactable record to create the restriction.
+
+
+--------------------------------------------------------------------------------
+21. QUALIFICATION / SCORING SEPARATION
+--------------------------------------------------------------------------------
+  - Today reads qualification; outcomes never write it (browser:
+    Interested and Not interested left Maple "unreviewed" and Northwind
+    "needs_review").
+  - Attempts/tasks are not in scoring_input(): the fingerprint is
+    unchanged after attempts and tasks (DB-tested), and grades stay
+    current.
+  - Not interested ≠ restriction.
+
+
+--------------------------------------------------------------------------------
+22. RESPONSIVE BEHAVIOUR
+--------------------------------------------------------------------------------
+Verified at 1440, 390 and 360:
+  - compact summary row (4 cards); tabs available on mobile
+  - Ready rows → cards with a tappable phone + a 44 px Call button
+  - due actions wrap; sheets are bottom sheets
+  - disposition targets ≥ 44 px
+  - no horizontal overflow; bottom navigation unchanged
+Fixed during review: the Call/task buttons' height utility conflicted with
+the size class (36 px); they now use min-height/min-width ≥ 44 px on
+phones.
+
+
+--------------------------------------------------------------------------------
+23. ACCESSIBILITY
+--------------------------------------------------------------------------------
+  - Today has a heading and labelled sections (summary list, Needs
+    attention heading, queues as labelled lists, the table caption with
+    row headers).
+  - Summary values carry their full label for screen readers.
+  - Overdue/Due now/Later today and task statuses are text.
+  - Dispositions are labelled radios in a fieldset ("What happened?");
+    DNC scope is labelled radios ("Who should not be contacted?").
+  - Date/time inputs are labelled and describedby the time zone.
+  - Copy feedback and refresh results are aria-live; errors are
+    role=alert.
+  - Sheets are modal dialogs with focus management.
+  - Phone targets ≥ 44 px.
+  - tel: links announce "opens your phone app; nothing is recorded".
+Not done: an axe audit / screen-reader pass (carried).
+
+
+--------------------------------------------------------------------------------
+24. TESTS ADDED
+--------------------------------------------------------------------------------
+A. tests/unit/contact-workflow.test.ts: 26 tests
+   - disposition labels and requirements (callback/follow-up times, DNC
+     scope, other note, optional retry, terminal outcomes, only DNC
+     restricts)
+   - company eligibility: A/B/C/Excluded/Outdated/Not scored; unreviewed,
+     qualified, needs_review, unqualified; restricted
+   - contact eligibility: left, restricted, no phone, future and due tasks,
+     same-day after no answer/voicemail/interested/other, not interested /
+     wrong number never returned; callable contact
+   - recommended contact: primary > secondary > fallback > primary contact
+     > name; whole-word; fallback to the next eligible contact; one item
+     per company; needs callable contact
+   - Ready order (A before B, fit desc, name; coverage ignored) and the
+     25-item bound
+   - due classification, order and split; blocked reasons
+   - time:
+       · zone validation
+       · UTC and positive/negative offsets
+       · local midnight
+       · DST spring (23 h) and autumn (25 h)
+       · local→UTC in London/Chicago, the non-existent local time,
+         invalid dates/times, UTC→local, labels
+   - browser input boundary (no actor/timestamps/scores; fit input has no
+     score fields); tel: links
+   - trusted-writer isolation (sole key reader, sole importers, no client
+     references, one rpc, no .from)
+B. tests/db/contact-workflow.test.ts: 19 tests
+   - timezone permissions and validation
+   - table privileges/RLS; attempt history immutability (even for the
+     trusted role); task status/time CHECKs; one open task per contact
+     (table-level); FK consistency; channel/disposition CHECKs
+   - record_contact_attempt:
+       · server time, actor, idempotent request
+       · every outcome rule
+       · callback/follow-up/retry creation
+       · source task completion
+       · task replacement
+       · DNC contact and company scopes
+       · restricted, left, no phone and cross-company/workspace refusals
+       · outsider and anon refused
+   - tasks: reschedule identity, complete/cancel history, closed-task
+     refusals, restricted reschedule refused, blocked cancel allowed
+   - Today reads:
+       · ready candidates = current A/B only, with contact facts
+       · currentness drop after a data change
+       · due tasks with blocking facts; future/closed excluded
+       · contacted-today local-day edges in 3 zones
+       · attempts/tasks don't change the fingerprint
+   - batch selection: unscored + outdated; a re-evaluated company enters
+     Ready; excluded never does
+C. tests/db/scoring.test.ts: now 14 (rewritten for the trusted writer, +1
+   access test)
+D. tests/unit/icp-config.test.ts: + timezone validation, + the
+   business-profile re-validation regression
+Mutation check: a temporary migration
+  - dropped the one-open-task index (after adding the table-level test)
+  - dropped the attempt no-update trigger
+  - granted the trusted writer to authenticated
+Each mutation was caught (3 failing tests in total). The temporary file
+was deleted and verified absent.
+
+
+--------------------------------------------------------------------------------
+25. TEST RESULTS (final code)
+--------------------------------------------------------------------------------
+npm.cmd run verify ........................ EXIT 0
+  lint · typecheck · vitest · build (Next.js 16.4.0) · check:bundle — all
+  PASS
+  vitest .................................. PASS 19 files, 487/487
+      DB (PGlite): tenancy 36 · icp 41 · lead core 40 · imports 20 ·
+                   discovery 18 · enrichment 17 · contact discovery 14 ·
+                   scoring 14 · contact workflow 19  (= 219)
+      unit: 268 (incl. contact workflow 26, business-agnostic 4)
+Browser (production build + fresh mock each run; fictional data; no real
+providers):
+  P1-E7 review-today.mjs .................. PASS 72/72
+  S1A review.mjs .......................... PASS 50/50
+  S2 review-settings.mjs .................. PASS 66/66
+  P1-E1 review-leads.mjs .................. PASS 40/40
+  P1-E2 review-imports.mjs ................ PASS 81/81
+  P1-E3 review-discover.mjs ............... PASS 57/57 + 8/8
+  P1-E4 review-enrichment.mjs ............. PASS 62/62 + 8/8
+  P1-E5 review-contacts.mjs ............... PASS 72/72 + 6/6
+  P1-E6 review-scoring.mjs ................ PASS 50/50
+Notes on the runs:
+  - S1A: the first run was 49/50; the check was adapted to the sr-only
+    count label (§3).
+  - P1-E4 unconfigured: the first run used the wrong server setup
+    (Discover must be configured); it passed with the Google-only server.
+  - P1-E6: the first run hit the known puppeteer "frame was detached"
+    flake; it passed when rerun alone.
+  - P1-E7: one run straddled a time boundary (§29 U4); it passed when
+    rerun.
+Business-agnostic guard ................... PASS
+Provider calls during P1-E7 ............... NONE
+Real Supabase/Postgres .................... NOT RUN — STILL OPEN
+
+
+--------------------------------------------------------------------------------
+26. BUNDLE REVIEW
+--------------------------------------------------------------------------------
+check:bundle PASS. Client bundles contain none of:
+  - SUPABASE_SERVICE_ROLE_KEY name or value
+  - save_lead_score_trusted / persistLeadScore (the writer implementation)
+  - Google/Hunter keys or endpoints
+No UI fixture routes/data. Server actions reach the browser only as
+action references.
+
+
+--------------------------------------------------------------------------------
+27. CODE-QUALITY REVIEW
+--------------------------------------------------------------------------------
+Verified
+  Q1  Score-write boundary closed; the trusted function keeps every check
+      plus the actor's membership.
+  Q2  Service-role isolation: one module, private client, one RPC; guard
+      tests + bundle scan.
+  Q3  Time: UTC storage; zone-aware bounds/inputs/labels via a maintained
+      library; DST tested.
+  Q4  Eligibility and contact choice are pure functions; SQL supplies
+      facts; currentness reuses P1-E6.
+  Q5  Qualification/scoring separation (browser + DB tested).
+  Q6  Suppression enforced in the DB for every operational write.
+  Q7  Attempts are append-only history; tasks have one open per contact
+      (table-level).
+  Q8  One transaction per outcome; idempotent resubmission.
+  Q9  Bounded reads everywhere on Today and in the drawer.
+  Q10 The client sends ids/choices/local text only (strict schemas).
+Follow-ups
+  F1 (Med) today_ready_candidates computes scoring_input() per current
+           A/B company on each Today load (as list_companies does). Fine at
+           MVP scale; consider a cached "inputs changed" marker for large
+           workspaces (carried P1-E6 F2).
+  F2 (Low) Ready count is exact up to 2,000 candidate companies (bounded
+           read).
+  F3 (Low) Attempts can't be corrected or voided (by design for P1-E7);
+           design an explicit void if needed.
+  F4 (Low) No task assignment or owner; tasks are workspace-wide.
+  F5 (Info) Carried: no CSP; forbidden pages return HTTP 200;
+           my_workspace_ids() RLS helper planned.
+
+
+--------------------------------------------------------------------------------
+28. CANONICAL-DESIGN DEVIATIONS
+--------------------------------------------------------------------------------
+No redesign. Reused: shell, PageHeader, the canonical summary cards and
+queue panel, lead-table language (grade badge, fit ring, soft Call
+button), ConfigSheet, StatusPill, DrawerSection, EmptyState.
+  D1 Summary card 4 "new discoveries" → "contacted today" (spec-sanctioned
+     metrics); mobile short labels: Ready / Callbacks / Follow-ups /
+     Contacted.
+  D2 Tab 4 "New Discoveries" → "Contacted today". The table's "Signal"
+     column → "Last contact"; no checkbox/kebab (no bulk actions exist).
+  D3 A compact "Needs attention" panel between the cards and the queue,
+     shown only when non-empty.
+  D4 The page header shows "Times in <zone>" and the Refresh lead scores
+     action.
+  D5 Drawer: per-contact next action + Activity section. The canonical
+     drawer's Disposition pills are realised as the Start contact sheet's
+     labelled radios (9 outcomes).
+  D6 TodayQueue accepts tab definitions; the fixture keeps the canonical
+     defaults.
+
+
+--------------------------------------------------------------------------------
+29. UNRESOLVED ISSUES
+--------------------------------------------------------------------------------
+  U1 PRE-PRODUCTION BLOCKER — REAL SUPABASE VERIFICATION STILL OPEN
+     (219 DB tests on PGlite only). This also means the service-role key
+     path has only been exercised against the UI-review mock and PGlite
+     roles. A real-stack run must confirm the grants (service_role
+     EXECUTE; authenticated denied) and an end-to-end Evaluate fit.
+  U2 Live provider smoke tests still not run (no keys); not needed here.
+  U3 Browser checks use the UI-review mock: JS stand-ins for the workflow
+     functions and Today reads. The real SQL is proven in tests/db and the
+     rules are unit-tested.
+  U4 The review's fixture times are relative to "now" in UTC. Running
+     within minutes of UTC midnight, or with a long delay between mock
+     start and checks, can shift Later today / Due now labels. The
+     fixtures clamp to the current UTC day; just rerun.
+  U5 There is no user directory, so actors show as "by you" / "by a
+     teammate".
+  U6 database.types.ts is still hand-maintained.
+  U7 No axe audit / screen-reader pass (carried). 1280/768 were not
+     screenshotted separately (same breakpoints as 1440/390).
+  U8 F1–F4 above.
+
+
+--------------------------------------------------------------------------------
+30. SCREENSHOTS (docs/reports/screenshots/P1-E7/)
+--------------------------------------------------------------------------------
+Production build + UI-review mock (MOCK_TODAY=1), fictional data.
+  01-today-desktop.png             Today: header + time zone + Refresh,
+                                   cards, Needs attention, Callbacks
+  02-today-ready-desktop.png       Lead Queue: A/B order, recommended
+                                   contacts, fit, last contact, Call
+  03-today-due-desktop.png         Follow-ups: Due now
+  04-today-overdue-desktop.png     Callbacks: Overdue, then Later today
+  05-start-contact-desktop.png     Start contact: company/grade/fit,
+                                   contact, phone, Copy / Call on device
+  06-log-outcome-desktop.png       What happened? No answer + Schedule
+                                   another attempt (time zone shown)
+  07-callback-requested-desktop.png  Callback requested with date/time/
+                                   note (from an overdue task)
+  08-follow-up-scheduled-desktop.png  Saved: follow-up needed; task
+                                   complete; follow-up scheduled
+  09-today-after-attempt-desktop.png  Contacted today after the first
+                                   outcome
+  10-company-activity-desktop.png  Drawer Activity + next actions
+  11-do-not-contact-desktop.png    Do not contact: This person, reason
+  12-needs-attention-desktop.png   Outdated score, needs callable contact,
+                                   blocked task
+  13-today-mobile.png              390 Today
+  14-start-contact-mobile.png      390 Start contact
+  15-log-outcome-mobile.png        390 outcome form
+  16-callback-mobile.png           390 Callback date/time (time zone)
+  17-activity-mobile.png           390 drawer Activity
+  18-score-refresh-desktop.png     Refresh lead scores result
+
+
+--------------------------------------------------------------------------------
+31. EXACT RECOMMENDED NEXT STORY
+--------------------------------------------------------------------------------
+First, still: close U1 on a machine that can run Docker:
+  1. supabase start
+  2. db reset
+  3. db:types
+  4. SUPABASE_TEST_DB_URL test:db
+  5. verify
+  6. a manual end-to-end check with SUPABASE_SERVICE_ROLE_KEY set
+     (Evaluate fit, Refresh lead scores, one logged outcome)
+
+Then, with explicit approval only, a candidate:
+P1-E8 — Workspace members + task ownership:
+  - a minimal member directory (display names) so activity shows who acted
+  - assign tasks to a member and a "My tasks" filter on Today
+  - optional attempt void/correction with an audit trail
+No calling provider, email, SMS, campaigns or automation without separate
+approval.
+
+P1-E7 stops here. No calling, email, SMS, campaigns, automated follow-up,
+AI scoring, background prospecting or new provider integrations have been
+started. The canonical UI remains locked.
+================================================================================

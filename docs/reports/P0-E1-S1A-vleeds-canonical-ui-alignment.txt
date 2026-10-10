@@ -1,0 +1,373 @@
+================================================================================
+VLEEDS — COMPLETION REPORT
+Story:   P0-E1-S1A — Canonical UI Alignment
+Date:    2026-10-08
+Status:  COMPLETE (UI alignment).
+         PRE-PRODUCTION BLOCKER REMAINS OPEN: real-Supabase verification
+         (unchanged; see §1, §2 and §19).
+================================================================================
+
+HISTORY
+  Attempt 1 (2026-10-07): the story was first issued as Stage A
+  (real-Supabase verification) + Stage B (UI). Stage A failed at A1
+  (`npx.cmd supabase start` -> DockerLifecycleInspectError "Docker Desktop
+  is unable to start"; firmware virtualization disabled), so the hard gate
+  stopped all work. This is recorded in the addendum to
+  docs/reports/P0-E1-S1-vleeds-foundation.txt.
+  Attempt 2 (this report): the story was re-scoped by the owner to UI
+  alignment only. Docker and database work are explicitly out of scope, and
+  the real-Supabase item stays a documented pre-production blocker.
+
+--------------------------------------------------------------------------------
+1. STAGE A (REAL SUPABASE) RESULT
+--------------------------------------------------------------------------------
+NOT RUN in this story (out of scope by instruction). Last attempt FAILED at
+A1 (environment: AMD-V/SVM disabled in BIOS). No database, RLS, auth,
+tenancy, migration or DAL file was changed in this story.
+
+--------------------------------------------------------------------------------
+2. IS THE P0-E1-S1 BLOCKER CLOSED?
+--------------------------------------------------------------------------------
+NO. It remains a PRE-PRODUCTION BLOCKER: the 36-test tenant-isolation suite
+has run only on embedded Postgres (PGlite + Supabase shim), not on a real
+Supabase/Postgres stack. The P0-E1-S1 quality-gate checkbox stays unchecked.
+
+--------------------------------------------------------------------------------
+3. FILES CREATED
+--------------------------------------------------------------------------------
+UI system
+  src/components/ui/brand.tsx              VleedsMark + VleedsLogo (canonical V mark, spaced wordmark)
+  src/components/ui/empty-state.tsx        EmptyState + EmptyIllustration (halo, hills, tray or icon tile)
+  src/components/ui/password-input.tsx     show/hide password control
+  src/components/ui/use-dismiss.ts         outside-click / Escape popover helper
+Shell
+  src/components/shell/top-bar.tsx         SearchField, NotificationsButton, AccountMenu, Avatar
+  src/components/shell/mobile-shell.tsx    MobileHeader + workspace/account sheet (<dialog>)
+Today
+  src/components/today/summary-cards.tsx   operational summary cards
+  src/components/today/today-queue.tsx     tabbed queue panel with truthful empty states
+Lead presentational foundation (no data model)
+  src/components/leads/lead-ui.tsx         LeadGradeBadge, FitScore, SignalChip, DispositionPill
+  src/components/leads/lead-table.tsx      LeadTable (table on md+, stacked cards below)
+  src/components/leads/lead-detail-drawer.tsx  LeadDetailDrawer (right-side drawer)
+Helpers
+  src/lib/format.ts                        initialsFromEmail
+Development-only fixtures (excluded from normal builds)
+  src/dev-fixtures/today-fixture.ts
+  src/app/ui-fixtures/today/page.fixture.tsx
+  src/app/ui-fixtures/today/fixture-today.tsx
+Docs
+  docs/design/vleeds-design-tokens.md
+  docs/reports/P0-E1-S1A-vleeds-canonical-ui-alignment.txt (this file)
+  docs/reports/screenshots/P0-E1-S1A/*.png (17 files)
+
+--------------------------------------------------------------------------------
+4. FILES MODIFIED
+--------------------------------------------------------------------------------
+  src/app/globals.css                 design tokens rewritten (see §6)
+  src/app/layout.tsx                  Inter font; viewport-fit=cover; theme color
+  src/components/ui/primitives.tsx    Button variants/sizes, IconButton, Panel,
+                                      PanelHeader, IconCircle, StatusPill, Kbd,
+                                      Field (optional label), inputs, Alert, PageHeader
+  src/components/shell/app-shell.tsx  sidebar + top bar (lg+); header + bottom nav (<lg)
+  src/components/shell/primary-nav.tsx desktop nav restyle + MobileBottomNav
+  src/components/shell/workspace-switcher.tsx canonical card; shared WorkspaceList
+  src/components/shell/skeletons.tsx, section-page.tsx, status-panels.tsx
+  src/app/w/[workspaceId]/{today,discover,leads,campaigns,settings}/page.tsx
+  src/app/login/page.tsx, login-form.tsx
+  src/app/workspaces/new/page.tsx, new-workspace-form.tsx (presentation only;
+                                      fields, action and validation unchanged)
+  src/app/not-found.tsx
+  next.config.ts                      build-time fixture gate (pageExtensions)
+  scripts/check-client-bundle.mjs     + fails if fixture route/data is in a normal build
+  scripts/ui-review/review.mjs        rewritten for the new shell (50 checks)
+  tests/unit/business-agnostic.test.ts + NEMT / medical transport / healthcare
+                                      staffing / paratransit / more providers;
+                                      now also scans scripts/
+  tests/unit/foundation.test.ts       + avatar initials test
+  README.md                           design-system and fixture notes
+
+NOT modified: supabase/migrations/*, supabase/seed.sql, src/lib/dal.ts,
+src/lib/supabase/*, src/proxy.ts, src/app/auth/actions.ts, src/app/route.ts,
+src/lib/home.ts, src/lib/env.ts, src/lib/navigation.ts, tests/db/*.
+Removed: the hamburger drawer for primary navigation (replaced by the bottom
+nav) and the `Wordmark` primitive (replaced by brand.tsx).
+
+--------------------------------------------------------------------------------
+5. UI COMPONENTS ADDED
+--------------------------------------------------------------------------------
+Primitives: Button (primary green / secondary / soft green / ghost; sm-md-lg),
+IconButton, Panel, PanelHeader, IconCircle, StatusPill (with dot), Kbd, Field,
+PasswordInput, Alert, EmptyState, EmptyIllustration, VleedsLogo, VleedsMark.
+Shell: WorkspaceSwitcher, WorkspaceList, PrimaryNav, MobileBottomNav,
+SearchField, NotificationsButton, AccountMenu, Avatar, MobileHeader (+ sheet).
+Today: SummaryCards, TodayQueue.
+Lead foundation (presentational only): LeadGradeBadge, FitScore, SignalChip,
+DispositionPill, LeadTable, LeadDetailDrawer. The spec's "ActionButton" is
+covered by Button variant="soft"/"primary" with an icon; "LeadTableShell" and
+"LeadDetailDrawerShell" are LeadTable and LeadDetailDrawer, which take plain
+view props.
+
+--------------------------------------------------------------------------------
+6. DESIGN TOKENS (full table: docs/design/vleeds-design-tokens.md)
+--------------------------------------------------------------------------------
+canvas #f8f7f4 · surface #ffffff · surface-muted #fbfaf8 · sunken #f1efea
+line #ebe8e2 · line-strong #dcd8d0
+ink #16191c (strong) · ink-muted #545b62 (secondary) · ink-subtle #6f757c (muted, AA)
+brand #1d5c45 · brand-hover #174b38 · brand-strong #154532
+brand-tint #e8f1ec · brand-tint-strong #d5e8dd
+warning #a86211 / tint #fdf2e2 · attention #cc6430 / tint #fcefe7
+danger #b23a31 / tint #fcebe9 · info #2d5fc4 / tint #eaf0fc · violet #7448b8 / tint #f2ecfb
+radius sm 6 · md 8 · lg 10 · xl 14 · 2xl 18
+shadows: card, bar, pop, drawer (all soft, low alpha)
+Typography: Inter. Page title 28/34px bold; subtitle 15/17px; card title 18/20px.
+Spacing: 4px base; gutters 16/24/28px.
+All components use tokens; no raw hex colors in components (except the two
+brand-mark shades in brand.tsx).
+
+--------------------------------------------------------------------------------
+7. DESKTOP SHELL CHANGES (lg >= 1024px)
+--------------------------------------------------------------------------------
+- 256px warm-canvas sidebar: VLEEDS mark + spaced wordmark; workspace
+  selector card (green-tint building icon, underlined name, org, chevron);
+  primary nav with 48px rows, 22px icons, and a green-tint active fill with
+  green icon/label.
+- 72px white top utility bar: search field (icon, placeholder, ⌘ K keycaps),
+  notifications bell, avatar initials + chevron (account menu with email and
+  Sign out). Sign out moved here from the old sidebar footer.
+- Content on the canvas background; white rounded panels with fine borders
+  and soft shadows.
+
+--------------------------------------------------------------------------------
+8. MOBILE SHELL CHANGES (< lg)
+--------------------------------------------------------------------------------
+- Compact sticky header: logo (mark only below 385px), workspace pill
+  (briefcase icon from 400px), bell, avatar.
+- The workspace pill and avatar open a bottom sheet (native <dialog>: focus
+  trap, Escape, backdrop) holding the SECONDARY functions only: workspaces
+  grouped by organization, New workspace, signed-in identity, Sign out.
+- The hamburger drawer for primary navigation was removed.
+- Tablet (768px) uses the mobile shell (header + bottom nav).
+
+--------------------------------------------------------------------------------
+9. MOBILE BOTTOM NAVIGATION
+--------------------------------------------------------------------------------
+Fixed white bar with rounded top corners and a soft upward shadow, five equal
+items (Today, Discover, Leads, Campaigns, Settings) with 56px targets.
+- Active item: green-tint pill, green icon and label, aria-current="page";
+  Today uses a filled house as in the reference.
+- Bottom padding uses env(safe-area-inset-bottom) (viewport-fit=cover); main
+  content is padded to clear the bar.
+- Verified at 360, 390 and 768px: all five items present, targets >= 44px,
+  every section reachable, active state correct, no horizontal overflow.
+
+--------------------------------------------------------------------------------
+10. SETTINGS
+--------------------------------------------------------------------------------
+- Business profile card: green-tint building icon, title and description,
+  Edit button; label/value rows with dividers; website as a green underlined
+  link with external icon; role as a green pill.
+- Prospecting configuration card: target icon, title and description; the
+  eight rows (ICP, geographies, decision-maker titles, buying signals,
+  exclusion signals, scoring rules, enrichment providers, calling provider),
+  each with a line icon, description, peach "Not configured" pill with dot,
+  and a right chevron.
+- Edit and the rows are deliberately non-functional (see §13). No provider,
+  ICP or persistence work was done.
+
+--------------------------------------------------------------------------------
+11. LOGIN / ONBOARDING
+--------------------------------------------------------------------------------
+Login: centered VLEEDS logo; 420px white rounded card; 24px title;
+44px inputs with a green focus ring; show/hide password toggle (aria-pressed,
+aria-controls); full-width green primary button; red-tint error alert; footer
+"Access is by invitation…". Auth behaviour is unchanged: generic error, no
+sign-up, same server action.
+Onboarding: same five fields, server action and validation. Presented in the
+canonical card with a tinted icon header, "Optional" labels, inline field
+errors linked through aria-describedby, and a green primary button.
+Still a single step.
+
+--------------------------------------------------------------------------------
+12. FIXTURE-DATA APPROACH
+--------------------------------------------------------------------------------
+- The route /ui-fixtures/today is file page.fixture.tsx. next.config.ts
+  registers the "fixture.tsx" page extension ONLY when VLEEDS_UI_FIXTURES=1,
+  and throws if that is combined with VERCEL_ENV=production.
+- In normal builds the route and its data are not compiled at all
+  (12 routes vs 13). check:bundle scans .next/static + .next/server
+  (328 files) for the route path and the marker "vleeds-ui-fixture-only",
+  and the browser review confirms /ui-fixtures/today is "Not available" in a
+  normal build.
+- The fixtures are invented generic companies (no real businesses, no
+  transport/healthcare examples). There are no DB rows, no DAL use and no
+  service-role use; the page carries a visible "UI fixture" banner.
+- The real Today stays truthful: zero counts, empty queues, no table.
+
+--------------------------------------------------------------------------------
+13. CANONICAL-REFERENCE MISMATCHES (intentional)
+--------------------------------------------------------------------------------
+M1  Mobile summary labels: the canonical mobile reference uses
+    "Calls due / Follow-ups / New leads / Discoveries", which conflicts with
+    desktop "A leads ready / callbacks due / follow-ups / new discoveries" for
+    the same icons. Mobile uses short forms of the desktop metrics
+    ("Calls due / Callbacks / Follow-ups / Discoveries") so one metric has one
+    meaning.
+M2  Notification bell has no unread dot: there are no notifications; a dot
+    would misrepresent state. The panel says "No notifications".
+M3  Avatar shows initials, not a photo: no profile photos exist.
+M4  Settings "Edit" is shown but aria-disabled (slightly muted), and the
+    configuration-row chevrons are present but the rows are not links:
+    editing arrives in P0-E1-S2. Making them look active would mislead.
+M5  Search is a real input (⌘K / Ctrl+K focuses it) but shows "Search …
+    becomes available once this workspace has leads". There is no search
+    backend (by instruction).
+M6  Desktop Today (real) shows no search/filter buttons on the queue panel
+    when it is empty (nothing to filter); the fixture shows them.
+M7  Mobile header at 360-384px shows the V mark without the wordmark, and the
+    briefcase icon in the workspace pill is hidden below 400px, so the
+    workspace name keeps room. Long names truncate with an ellipsis (full name
+    in title and the sheet); "Alpha Workspace" is clipped by a few pixels at
+    390px.
+M8  Muted text is #6f757c, slightly darker than the reference grey, to meet
+    WCAG AA on white.
+M9  Fixture drawer is 360px wide below 1536px (400px at 2xl) so the table
+    stays readable at 1440px; columns still wrap more than in the wider
+    reference.
+M10 Fixture data uses generic companies and signals instead of the
+    reference's example businesses/industries (business-agnostic rule).
+M11 The workspace-selector name underline was reproduced as a subtle
+    underline, as in both references.
+
+--------------------------------------------------------------------------------
+14. RESPONSIVE QA RESULTS (production build, headless Chrome)
+--------------------------------------------------------------------------------
+1440px  all five sections: no horizontal overflow                     PASS
+1280px  all five sections: no horizontal overflow                     PASS
+768px   bottom nav pinned, 5 items, 56px targets, all sections, no overflow PASS
+390px   same + workspace pill unclipped (154px) + sheet               PASS
+360px   same + workspace pill unclipped (206px)                       PASS
+Fixture desktop 1440 / mobile 390: no horizontal overflow             PASS
+The lead table becomes stacked cards below md instead of shrinking columns.
+
+--------------------------------------------------------------------------------
+15. ACCESSIBILITY CHECKS
+--------------------------------------------------------------------------------
+- Landmarks: <aside>, two <nav aria-label="Primary"> (desktop vs mobile,
+  never both visible), <main>, <header>, form role="search".
+- Keyboard: tabs use role=tablist/tab/tabpanel with arrow-key navigation;
+  menus close on Escape and return focus; mobile sheet is a modal <dialog>
+  (focus trap, Escape); ⌘K/Ctrl+K focuses search; focus-visible ring in brand
+  green.
+- Labels: every icon-only button has aria-label; logo has sr-only text when
+  only the mark shows; external link announces "(opens in a new tab)";
+  disabled Edit announces "(not available yet)".
+- Forms: labels bound to inputs; errors linked by aria-describedby
+  (verified); password toggle uses aria-pressed and aria-controls.
+- Not color alone: grade is a letter with aria-label "Grade A"; fit score
+  shows its number with aria-label "Fit score 91 out of 100"; disposition
+  selection uses a ring + aria-pressed; "Not configured" is text.
+- Contrast: body #545b62 and muted #6f757c meet AA on white and on canvas.
+- Touch targets: bottom nav 56px; header controls 36-44px; row actions 44px
+  on mobile.
+- prefers-reduced-motion disables skeleton pulse and transitions.
+Not done: an automated axe audit and screen-reader testing (see §19).
+
+--------------------------------------------------------------------------------
+16. LINT / TYPECHECK / TEST / BUILD
+--------------------------------------------------------------------------------
+Final `npm.cmd run verify` (on the final code): EXIT 0
+  lint ............ PASS
+  typecheck ....... PASS (next typegen && tsc --noEmit)
+  tests ........... PASS 46/46 (36 tenant-isolation on PGlite + 10 unit)
+  build ........... PASS (Next.js 16.4.0; 12 routes; no /ui-fixtures)
+  check:bundle .... PASS (20 client files; 0 secrets; 0 fixture artifacts
+                    in 328 build files)
+Fixture build (VLEEDS_UI_FIXTURES=1): PASS, 13 routes incl. /ui-fixtures/today.
+Browser review (scripts/ui-review/review.mjs) on the final normal build:
+  50/50 PASS. Fixture mode: 3/3 PASS.
+
+--------------------------------------------------------------------------------
+17. REAL-SUPABASE TENANCY-TEST RESULTS
+--------------------------------------------------------------------------------
+NOT AVAILABLE. The suite is unchanged and passes 36/36 on PGlite. A run with
+SUPABASE_TEST_DB_URL against real Supabase/Postgres is still outstanding
+(pre-production blocker).
+
+--------------------------------------------------------------------------------
+18. SECURITY REGRESSION RESULTS
+--------------------------------------------------------------------------------
+PASS  unauthenticated /, /w/{id}/today, /workspaces/new -> 307 /login (safe ?next)
+PASS  generic invalid-credential message; no sign-up added
+PASS  sign-out, then workspace routes require login again
+PASS  foreign, nonexistent and malformed workspace ids -> identical "Not available"
+PASS  single-org user's switcher lists only own-org workspaces; multi-org
+      user's lists exactly both orgs, grouped
+PASS  switching preserves the section and updates the active workspace
+PASS  browser made ZERO requests to Supabase (no browser client introduced)
+PASS  no secrets / service-role / connection strings in 574 browser-visible
+      responses; no session tokens in HTML/RSC; no fixture data
+PASS  no service-role credential anywhere in the app; bundle scan clean
+PASS  business-agnostic guard (now incl. NEMT / medical transport /
+      healthcare staffing / paratransit / more providers, and scripts/)
+PASS  security headers unchanged (X-Frame-Options DENY, nosniff, etc.)
+Security-relevant source (DAL, Supabase clients, proxy, auth actions, RLS,
+migrations) was not modified.
+
+--------------------------------------------------------------------------------
+19. UNRESOLVED ISSUES
+--------------------------------------------------------------------------------
+U1  PRE-PRODUCTION BLOCKER (carried over): real-Supabase tenancy suite not
+    run. Needs AMD-V/SVM enabled + Docker, or a hosted dev project.
+U2  Browser checks used the UI-review mock backend, not real Supabase Auth.
+U3  Settings Edit and configuration rows are inert until P0-E1-S2.
+U4  No automated accessibility audit (axe) or screen-reader pass yet.
+U5  Forbidden-workspace pages still return HTTP 200 with the uniform
+    "Not available" page (carried over from P0-E1-S1, U3; no data impact).
+U6  The search keycap shows ⌘ K on all platforms (Ctrl+K also works), to
+    avoid a hydration mismatch from platform detection.
+U7  This machine is slow under load (Docker Desktop retrying in the
+    background); the review script uses 90s navigation timeouts. One
+    review run timed out before that change and passed on rerun.
+U8  Fixture screenshots 15-17 were captured from a fixture build made just
+    before a final Discover-only layout tweak. Fixture components were not
+    affected.
+
+--------------------------------------------------------------------------------
+20. SCREENSHOTS PRODUCED (docs/reports/screenshots/P0-E1-S1A/)
+--------------------------------------------------------------------------------
+Real behaviour (production build, mock backend, generic seed data):
+  01-login-desktop.png               08-workspace-switcher-desktop.png
+  02-login-error-desktop.png         09-onboarding-desktop.png
+  03-today-desktop-empty.png         10-onboarding-validation-desktop.png
+  04-settings-desktop.png            11-today-mobile.png
+  05-discover-desktop.png            12-settings-mobile.png
+  06-leads-desktop.png               13-mobile-bottom-navigation.png
+  07-campaigns-desktop.png           14-mobile-workspace-controls.png
+UI FIXTURES ONLY (invented data; not real behaviour; fixture build):
+  15-today-desktop-ui-fixture.png
+  16-lead-detail-drawer-ui-fixture.png
+  17-today-mobile-ui-fixture.png
+
+--------------------------------------------------------------------------------
+21. EXACT RECOMMENDED NEXT STORY
+--------------------------------------------------------------------------------
+First, close U1 (pre-production blocker). Enable virtualization, start
+Docker, then:
+  npx.cmd supabase start
+  npx.cmd supabase db reset
+  npm.cmd run db:types
+  $env:SUPABASE_TEST_DB_URL="postgresql://postgres:postgres@127.0.0.1:54322/postgres"; npm.cmd run test:db
+  npm.cmd run verify
+and append the result to the P0-E1-S1 report.
+
+Then, with explicit approval only:
+P0-E1-S2 — Workspace Business Profile + ICP Configuration Foundation
+(editable business profile; icp_profiles with geographies, ideal-customer
+criteria, decision-maker titles, buying/exclusion signals and a configurable
+scoring model; RLS; tenant-isolation tests). This activates the Settings Edit
+button and configuration rows built here.
+
+P0-E1-S1A stops here. No ICP, discovery, enrichment, calling or campaign work
+has been started.
+================================================================================

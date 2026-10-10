@@ -1,0 +1,663 @@
+================================================================================
+VLEEDS — COMPLETION REPORT
+Story:   P1-E2 — Manual + CSV Lead Ingestion and Deduplication
+Date:    2026-10-08
+Status:  COMPLETE (development verification on embedded Postgres/PGlite).
+
+  ******************************************************************
+  *  REAL SUPABASE PRE-PRODUCTION VERIFICATION: STILL OPEN          *
+  *  All four DB suites (137 tests: 36 tenancy + 41 ICP + 40 lead   *
+  *  core + 20 imports) have run ONLY on PGlite with the Supabase   *
+  *  shim, never on a real Supabase/Postgres stack. Docker is still *
+  *  unavailable on this machine. Not attempted in this story.      *
+  *  Mandatory gate before production.                              *
+  ******************************************************************
+================================================================================
+
+CONTENTS
+  1 Summary              11 Duplicate detection     21 Responsive behaviour
+  2 Files created        12 Merge behaviour         22 Accessibility
+  3 Files modified       13 Manual company entry    23 Tests added
+  4 Migration/schema     14 Manual contact entry    24 Test results
+  5 Import batches       15 Source evidence         25 Code-quality review
+  6 Import rows          16 Commit/idempotency      26 Canonical-design deviations
+  7 CSV parsing          17 Import reporting        27 Unresolved issues
+  8 Column mapping       18 Pagination              28 Screenshots
+  9 Normalization        19 Filters                 29 Recommended next story
+ 10 Validation           20 Suppression UI
+
+
+--------------------------------------------------------------------------------
+1. SUMMARY
+--------------------------------------------------------------------------------
+Users can now fill the lead core in two controlled ways.
+  - Leads → Add leads → Add manually: a company, optionally with a first
+    contact. It goes through the same normalization, validation and duplicate
+    rules as imports. A same-domain company can't be added twice; weaker
+    matches warn first. The drawer gained Add contact and do-not-contact
+    controls.
+  - Leads → Add leads → Import CSV: a staged workflow, Upload → Map → Review
+    (validate, match, decide merge/skip/create) → Import (chunked, one
+    transaction per row) → Report. Nothing reaches companies/contacts until
+    the user presses "Import N rows". Rows can't be committed twice.
+  - Evidence: manual and CSV evidence for every non-empty field. CSV evidence
+    is traceable to its import batch and row.
+  - Leads page: real server-side pagination (25 per page), basic filters
+    (qualification, grade, restriction, has contacts, country) and sorts
+    (updated, name, qualification, grade), all in the URL.
+  - No discovery, providers, enrichment, scoring, calling, email or campaigns.
+Quality gate: npm.cmd run verify EXIT 0 (264/264 tests). Browser reviews:
+P1-E2 81/81, with regressions P1-E1 40/40, S2 66/66 and S1A 50/50. The import
+RLS/constraint mutation check detected every break.
+
+
+--------------------------------------------------------------------------------
+2. FILES CREATED
+--------------------------------------------------------------------------------
+Database
+  supabase/migrations/20261010000000_manual_csv_ingestion.sql
+Import domain library (src/lib/imports/; shared, no business data)
+  csv.ts        Papa Parse wrapper: decode (UTF-8/BOM, Windows-1252 fallback),
+                parse, limits, unique headers; text only
+  limits.ts     MVP limits + checkCsvFile (parser-free, so it's also used
+                client-side without bundling Papa Parse)
+  fields.ts     mappable Vleeds fields, mapping schema, header suggestions
+  rows.ts       mapped cells → normalized company/contact + issues (through the
+                lead-core schemas)
+  classify.ts   match state / suggested decision / allowed decisions (dedupe.ts)
+  merge.ts      conservative merge planning for companies and contacts
+  commit.ts     pure per-row commit planner (idempotent; contact rules)
+  ingest.ts     column maps + evidence items shared by manual and CSV
+  summary.ts    confirmation and report counts
+DAL
+  src/lib/dal/imports.ts   batches, staging, review pages, decisions, chunked commit
+Routes and actions
+  src/app/w/[workspaceId]/leads/import/page.tsx            upload + recent imports
+  src/app/w/[workspaceId]/leads/import/[batchId]/page.tsx  map / review / import / report
+  src/app/w/[workspaceId]/leads/import/actions.ts          upload, mapping, decisions,
+                                                           start/continue, cancel, back
+UI
+  src/components/imports/  import-steps, upload-form, mapping-form, review-rows,
+                           decision-control (incl. compare sheet), import-runner,
+                           cancel-import-button
+  src/components/leads/    add-leads-menu (incl. manual company sheet),
+                           add-contact-sheet, restriction-control, lead-filters,
+                           pagination
+  src/lib/lead-core/list-query.ts   URL state for page/filters/sort
+Tests and tooling
+  tests/unit/imports.test.ts          28 unit tests
+  tests/db/imports.test.ts            20 data-boundary tests (PGlite)
+  scripts/ui-review/review-imports.mjs  81 browser checks + screenshots 01–17
+Docs
+  docs/product/vleeds-imports.md
+  docs/reports/P1-E2-vleeds-manual-csv-ingestion.txt (this file)
+  docs/reports/screenshots/P1-E2/*.png (17)
+
+
+--------------------------------------------------------------------------------
+3. FILES MODIFIED
+--------------------------------------------------------------------------------
+  src/app/w/[workspaceId]/leads/page.tsx     Add leads action, pagination, filters,
+                                             new empty state, drawer on any page
+  src/app/w/[workspaceId]/leads/actions.ts   + createCompany, addContact,
+                                             addRestriction, liftRestriction
+  src/components/leads/company-drawer.tsx    + restriction controls, Add contact
+  src/components/leads/company-drawer-frame.tsx  close link keeps list state
+  src/components/settings/config-sheet.tsx   small adjustments so it hosts the new sheets
+  src/lib/dal/{companies,contacts,lead-sources,suppressions,index}.ts
+                                             paginated listCompanies (RPC),
+                                             matching/merge helpers, manual
+                                             create, restrictions
+  src/lib/lead-core/{schemas,views}.ts       contact field schema, summaries
+  src/lib/supabase/database.types.ts         + 2 tables, 3 functions, 2 columns
+                                             (hand-maintained)
+  tests/unit/business-agnostic.test.ts       + P1-E2 review fixture names
+  scripts/ui-review/mock-supabase.mjs        import tables, RPC stand-ins,
+                                             inserts/updates, offset paging
+  next.config.ts                             serverActions.bodySizeLimit 6mb
+  package.json                               + papaparse, @types/papaparse
+  docs/architecture/vleeds-data-model.md     §3c ingestion, entity map, DAL, order
+  docs/product/vleeds-lead-core.md           Leads page, restrictions, next
+NOT modified: earlier migrations, auth, proxy, Supabase clients, env, seed.sql,
+ICP/Settings logic, role rules, design tokens, shell/navigation.
+
+
+--------------------------------------------------------------------------------
+4. MIGRATION / SCHEMA (20261010000000_manual_csv_ingestion.sql)
+--------------------------------------------------------------------------------
+New: import_batches, import_rows; lead_sources.import_batch_id/import_row_id;
+functions ingest_lead, stage_import_rows, list_companies; triggers
+guard_import_batch, guard_import_row (+ updated_at and immutable-key triggers).
+All relationships are composite same-workspace FKs. RLS is on, with
+column-level grants, nothing for anon, no DELETE. Functions are SECURITY
+INVOKER with search_path='' and are not executable by anon.
+Indexes (each tied to a query):
+  import_batches (workspace_id, created_at desc)   recent imports
+                 (workspace_id, status)
+  import_rows    UNIQUE (import_batch_id, row_number)
+                 (import_batch_id, match_state)    review filters
+                 (import_batch_id, row_number) WHERE commit_result IS NULL
+                                                   next commit chunk
+  lead_sources   (import_batch_id) WHERE NOT NULL  traceability
+Not added: separate decision/commit_result indexes. Filtering happens on one
+batch's rows (≤ 5,000), which the batch_match index already narrows.
+P1-E1 identity rules are unchanged; the unique active domain index remains
+the backstop.
+
+
+--------------------------------------------------------------------------------
+5. IMPORT BATCHES
+--------------------------------------------------------------------------------
+Columns: filename, status, headers (1–100), mapping, total_rows (≤ 5000),
+valid/invalid/created/merged/skipped/failed counts, created_by, created_at,
+updated_at, completed_at, archived_at.
+State model (kept small; no background-job infrastructure):
+  mapping ⇄ review → processing → completed
+  mapping/review → cancelled
+The spec's "uploaded", "ready" and "failed" states were not needed. Upload
+creates the batch directly in mapping; "ready" is review with decisions; a
+row-level failure never fails the batch. Completed/cancelled are terminal and
+frozen by trigger (only archived_at may change). completed is reachable only
+from processing and requires completed_at.
+
+
+--------------------------------------------------------------------------------
+6. IMPORT ROWS
+--------------------------------------------------------------------------------
+row_number (unique per batch); raw_data (cell strings, ≤ 16 KB);
+normalized_data {mapped, company, contact} (≤ 16 KB); validation_errors
+[{level, field, message}] (≤ 8 KB); match_state; match_reason;
+matched_company_id / matched_contact_id / matched_import_row_id (earlier row
+of the same file); decision; commit_result; commit_notes (≤ 8 KB);
+committed_company_id / committed_contact_id.
+CHECKs: an invalid row can only be skipped; created/merged ⇒ committed
+company. A row with a commit_result is frozen by trigger, as is every row of
+a terminal batch.
+
+
+--------------------------------------------------------------------------------
+7. CSV PARSING
+--------------------------------------------------------------------------------
+Papa Parse 5.7 (mature parser), dynamicTyping off: values stay text, so
+formulas such as "=SUM(A1)" are literal strings.
+Handled and tested:
+  - BOM; quoted commas; quoted line breaks; escaped quotes; CRLF/LF/CR
+  - blank rows (dropped)
+  - duplicate/blank headers ("Email (2)", "Column 3")
+  - short rows (padded) and long rows (trimmed)
+  - unclosed quote → rejected
+  - UTF-8, falling back to Windows-1252
+Limits (src/lib/imports/limits.ts):
+  - .csv only; 5 MB file; 5,000 rows; 100 columns; 1,000 characters per cell
+  - Name and size are checked in the browser AND on the server. The
+    browser-reported MIME type is not trusted. The Server Action body limit
+    is 6 MB.
+Lifecycle: the file is read into server-action memory, parsed and discarded.
+Vleeds never writes it to disk or storage. Only parsed cells are staged.
+XLS/XLSX: not supported (message suggests saving as CSV).
+
+
+--------------------------------------------------------------------------------
+8. COLUMN MAPPING
+--------------------------------------------------------------------------------
+Every column → a Vleeds field (14 company + 9 contact fields, exactly the
+spec list) or "Ignore this column". Suggestions come from generic header
+synonyms; sample values are shown; ignored columns need no action. Each field
+can be used once (flagged inline). Company name is required (the P1-E2
+product decision). The mapping is saved on the batch; there is no reusable
+mapping-template system (out of scope). "Back to mapping" re-stages
+everything from raw_data.
+
+
+--------------------------------------------------------------------------------
+9. NORMALIZATION
+--------------------------------------------------------------------------------
+No new algorithms. Rows are validated and normalized through the P1-E1
+lead-core Zod schemas, which call src/lib/lead-core/normalize.ts: domain
+(from domain, or derived from the website), company name, email, person name
+and international phone. The display/original values are kept (canonical
+name, phone as entered, email as entered). Locations: ISO code or English
+country name → ISO code; region, city, postal code and address lines are
+trimmed text. Qualification and seniority accept keys or labels.
+
+
+--------------------------------------------------------------------------------
+10. VALIDATION
+--------------------------------------------------------------------------------
+Every row is labelled Valid / Warning / Error, with per-field messages.
+  Errors: missing company name (including contact-only rows); invalid
+    website/domain/email/profile URL; employee min > max or not a whole
+    number; cell > 1,000 chars; contact without a name; oversized row
+  Warnings: unknown country, unsupported qualification/seniority (left
+    out); website/domain host mismatch; national phone (not comparable)
+One bad row never rejects the file. Invalid rows can only be skipped
+(DB CHECK). Contact-only rows are invalid: no orphan contacts.
+
+
+--------------------------------------------------------------------------------
+11. DUPLICATE DETECTION
+--------------------------------------------------------------------------------
+Reuses matchCompany / matchContact (src/lib/lead-core/dedupe.ts) with the
+P1-E1 hierarchy. It runs against existing active companies AND earlier rows
+of the same file.
+  matched (provider id / domain)       suggest Merge; allowed Merge, Skip
+  possible_duplicate (intl phone,      no suggestion; allowed Merge, Skip,
+    name + same place)                 Create new
+  new                                  suggest Create; allowed Create, Skip
+  invalid                              Skip only
+Low-confidence matches are never merged automatically. "Create new" is not
+offered for a domain match; the compare sheet explains why (the domain rule
+was not weakened). Contacts are matched at commit time against current data:
+email = same person; same name at the company = merged with a note; an email
+owned at another company blocks the contact (noted). Manual entry uses the
+same matchCompany: same domain → blocked with Use existing; weaker →
+"Add as a separate company" after confirmation.
+
+
+--------------------------------------------------------------------------------
+12. MERGE BEHAVIOUR (exact rules; product doc §4)
+--------------------------------------------------------------------------------
+  1 A blank imported value never changes anything.
+  2 Imported values fill empty fields only.
+  3 Equal values (case-insensitive; normalized phone; trailing slash) need no
+    change.
+  4 Conflicting populated values: the existing value is kept, the conflict is
+    written to the row's notes, and the imported value is still appended as
+    evidence.
+  5 Names are never changed by a merge.
+  6 Location is filled only when empty.
+  7 Employee range: empty ends are filled unless that would make min > max.
+  8 Qualification is applied only while the company is "unreviewed".
+Contacts follow rules 1–5.
+
+
+--------------------------------------------------------------------------------
+13. MANUAL COMPANY ENTRY
+--------------------------------------------------------------------------------
+Add leads → Add manually opens a canonical sheet (ConfigSheet). Fields:
+  - name (required), website, primary domain, phone
+  - country / region / city, employee min / max, notes
+  - optional first contact (name, title, email, phone)
+Server-side Zod validation, inline field errors. Duplicate check before
+saving (§11). The company, contact and evidence are written as one
+transaction through ingest_lead, then the drawer opens on the new company.
+Edit company was NOT implemented, to keep the story focused (see §27).
+
+
+--------------------------------------------------------------------------------
+14. MANUAL CONTACT ENTRY
+--------------------------------------------------------------------------------
+Company drawer → Add contact. Fields: full name (or first/last), title,
+seniority, email, phone, profile URL, notes, primary contact.
+  - An existing email is refused (case-insensitive).
+  - The same name at the company asks "Add anyway".
+  - The primary checkbox is disabled when a primary exists; the server
+    checks too, and the DB unique index is the backstop.
+  - The first contact of a company becomes primary.
+
+
+--------------------------------------------------------------------------------
+15. SOURCE EVIDENCE
+--------------------------------------------------------------------------------
+One lead_sources row per NON-EMPTY observed field. Manual entry uses
+source_kind=manual; CSV commits use source_kind=csv with provider_key null.
+CSV rows also carry import_batch_id + import_row_id (nullable, composite
+same-workspace FKs, immutable). Keys: company.name / website / domain /
+phone / location / employee_range and contact.name / title / seniority /
+email / phone / linkedin. Values are single field values, ≤ 2 KB (P1-E1
+CHECK), never the whole row. For merges, conflicting imported values are
+still recorded as evidence. "Which import created/updated this company?" is
+answered via lead_sources.import_batch_id or import_rows.committed_company_id.
+
+
+--------------------------------------------------------------------------------
+16. COMMIT / IDEMPOTENCY
+--------------------------------------------------------------------------------
+  - "Import N rows" (N = create + merge decisions) moves review → processing.
+    Only one such update can succeed, so a double click can't start two
+    imports.
+  - The page then calls continueImport repeatedly. Each call commits the next
+    100 uncommitted rows in file order, ONE TRANSACTION PER ROW
+    (ingest_lead), and announces progress. A failure marks only that row
+    "failed" with a fixed, safe message; earlier rows stay committed.
+  - A reload while processing resumes automatically.
+  - Merges into a company created earlier in the same file use that row's
+    result. If that row was skipped or failed, the later row creates the
+    company instead.
+  - Four guards against committing twice: (1) the planner ignores rows with
+    a result; (2) ingest_lead locks the row FOR UPDATE, returns the recorded
+    result if present, and requires the batch to be processing; (3) a trigger
+    freezes committed rows; (4) completed/cancelled batches are frozen.
+  - After completion there is no Import action (verified after reload).
+Practical limit: a 5,000-row file = 50 chunk requests. That is fine on a
+normal connection, but the tab must stay open (reopening resumes). There is
+no job queue (not needed for the MVP).
+
+
+--------------------------------------------------------------------------------
+17. IMPORT REPORTING
+--------------------------------------------------------------------------------
+Report: Total rows, Created, Merged, Skipped, Invalid, Failed. The row list
+has views All / Created / Merged / Skipped / Invalid / Failed (50 per page).
+Each row shows its outcome, decision, a link to the company and notes
+(conflicts kept, contact not imported, failure reason). Leads → Import CSV
+lists recent imports with their status. Import history can't be deleted from
+the UI; Cancel (with a confirmation step) marks a batch cancelled. No
+analytics.
+
+
+--------------------------------------------------------------------------------
+18. PAGINATION
+--------------------------------------------------------------------------------
+The 100-row cap is gone. public.list_companies pages on the server (25 per
+page, LIMIT/OFFSET, total via count(*) over()), with Previous / Next, "page
+N of M" and "Showing 26–31 of 31 companies". A page past the end says
+"This page is empty". The URL keeps page, filters, sort and ?company=, so
+the drawer works from any page.
+
+
+--------------------------------------------------------------------------------
+19. FILTERS (and sorting)
+--------------------------------------------------------------------------------
+Filters: Qualification, Grade (A/B/C/Not scored; real current scores only),
+Restriction, Contacts (has/none), Country (ISO). Sort: Recently updated
+(default), Company name, Qualification, Grade.
+  - Implemented as a GET form (works without JavaScript) that applies on
+    change.
+  - On phones the filters fold behind a Filters button.
+  - Unknown URL values are ignored.
+  - Full text search was NOT added; it is left for a later story (it needs
+    index work to be correct at scale).
+
+
+--------------------------------------------------------------------------------
+20. SUPPRESSION UI
+--------------------------------------------------------------------------------
+Company drawer:
+  - "Do not contact this company" / per contact "Do not contact", with an
+    optional reason; any member can add one.
+  - "Lift restriction" for owners/admins. Members see "Only an owner or admin
+    can lift this restriction."
+The P1-E1 role model is unchanged: RLS enforces it, and the action checks
+first for a clear message. Calm wording; no legal or compliance claims.
+
+
+--------------------------------------------------------------------------------
+21. RESPONSIVE BEHAVIOUR
+--------------------------------------------------------------------------------
+Verified at 1440 and 390/360 (browser review). 1280 and 768 use the same
+md/lg breakpoints as the reviewed Leads page.
+  - Import pages: single column on phones.
+  - Steps: compact on phones (only the current step's name is shown).
+  - Mapping: stacked rows with full-width 44px selects.
+  - Review/report: a table on md+, cards below md.
+  - Compare: right sheet on sm+, bottom sheet on phones.
+  - No horizontal page overflow; the bottom navigation is unchanged and the
+    Add leads menu fits at 360px.
+  - Filter selects and decision controls are ≥ 44px on phones.
+
+
+--------------------------------------------------------------------------------
+22. ACCESSIBILITY
+--------------------------------------------------------------------------------
+  - CSV input has a label (the drop area).
+  - Mapping selects are labelled by their column name.
+  - Step indicator: a nav list with aria-current="step" and text states
+    (completed / current / not started).
+  - Row errors are listed under each row and associated with its decision
+    select (aria-describedby).
+  - Decisions use a labelled select plus a compare sheet with a radio
+    fieldset (disabled options explained in text).
+  - Progress, import summary and pagination use aria-live / role=status.
+  - Sheets are modal dialogs (focus trap, Escape, focus return).
+  - Cancel asks for confirmation, with focus on "Keep import".
+  - Targets are ≥ 44px on phones.
+  - Fixed during review:
+      · duplicate element ids (each row renders in the table and as a card)
+      · 40px filter selects on phones
+Not done: automated axe audit / screen-reader pass (carried).
+
+
+--------------------------------------------------------------------------------
+23. TESTS ADDED
+--------------------------------------------------------------------------------
+A. tests/unit/imports.test.ts: 28 tests
+   CSV parsing:
+     - BOM, quoted commas/line breaks, escaped quotes
+     - CRLF/CR, blank rows
+     - padding/trimming; values stay text (no formula/number evaluation)
+     - unique headers
+     - empty / header-only / row / column limits
+     - file name and size check; UTF-8 and Windows-1252
+   Mapping: suggestions (each field once); company name required; a field
+     mapped twice is refused.
+   Rows: full normalization via the lead-core helpers; per-field errors;
+     warnings; resolvers.
+   Classification: new / matched / possible duplicate / invalid; in-file
+     duplicates; allowed decisions.
+   Merge: fill blanks, ignore blanks/equal values, keep on conflict; names
+     never changed; unreviewed qualification; contacts.
+   Commit planning:
+     - idempotency; skip/undecided/invalid write nothing
+     - create with primary-if-none and evidence only for non-empty fields
+     - merge patch + same-email contact
+     - email owned at another company never moved or duplicated
+     - vanished merge target fails the row
+   Evidence and summary: manual vs CSV distinguishable; counts.
+B. tests/db/imports.test.ts: 20 tests (PGlite, API-role method)
+   - RLS on, nothing for anon; imports visible only in their workspace
+   - members create batches only in their own workspace; created_by = caller
+   - rows attached to a same-workspace batch; row numbers unique per batch
+   - status values; completed only from processing
+   - completed/cancelled batches and their rows frozen; archiving allowed
+   - decision/invalid CHECKs
+   - one workspace's imports never touch another's
+   - stage_import_rows bulk staging
+   - ingest_lead:
+       · company + primary contact + manual evidence in one call
+       · second contact not primary
+       · all-or-nothing (an invalid contact rolls back the company)
+       · RLS/invoker boundaries
+       · merge fills only the given columns
+       · row commit needs a processing batch, records its outcome and
+         traceable CSV evidence, and never commits twice
+       · evidence can only point at a same-workspace import
+   - list_companies: pages + total + empty page; each filter; each sort;
+     a foreign workspace returns nothing
+   Mutation check: a temporary migration opened import_batches reads,
+   dropped both guard triggers, the row-number unique constraint, the
+   invalid-row CHECK and the evidence→batch FK. Result: 7/20 tests FAILED
+   (every break detected). The file was then deleted and verified absent.
+C. Business-agnostic guard: P1-E2 review fixture names may not appear in
+   src/ or migrations.
+D. scripts/ui-review/review-imports.mjs: 81 browser checks (§24).
+
+
+--------------------------------------------------------------------------------
+24. TEST RESULTS (final code)
+--------------------------------------------------------------------------------
+npm.cmd run verify ........................ EXIT 0
+  lint .................................... PASS (0 problems)
+  typecheck ............................... PASS
+  vitest .................................. PASS 9 files, 264/264
+      DB (PGlite): tenancy 36 · icp_profiles 41 · lead core 40 · imports 20
+      unit: 127 (incl. business-agnostic 3, lead core 48, imports 28)
+  build (Next.js 16.4.0) .................. PASS
+  check:bundle ............................ PASS (27 client files, 0 secrets;
+                                            0 fixture artifacts in the build)
+  Papa Parse in client chunks ............. none (manual scan of .next/static)
+Import RLS/constraint mutation check ...... PASS (7/20 failed when broken)
+Browser, final build, fresh mock each:
+  P1-E2 review-imports.mjs ................ PASS 81/81
+  P1-E1 review-leads.mjs (regression) ..... PASS 40/40
+  S2 review-settings.mjs (regression) ..... PASS 66/66
+  S1A review.mjs (regression) ............. PASS 50/50
+Business-agnostic guard ................... PASS
+Fixture/import test data in production .... none (fixtures live only in
+                                            scripts/ui-review; guard + bundle)
+Real Supabase/Postgres .................... NOT RUN — STILL OPEN
+
+P1-E2 browser checks include:
+  - Add leads menu; manual validation; create with a normalized domain and
+    a primary contact; manual evidence
+  - same-domain warning (blocked, Use existing); same name + place
+    (separate allowed); cancel creates nothing
+  - contact: primary rule, case-insensitive email duplicate refused, contact
+    added
+  - CSV: labelled input; non-CSV rejected; mapping suggestions + ignored
+    columns + double-mapping flag; blank line dropped; quoted comma / line
+    break; domain match, name + place, in-file duplicate, missing company,
+    invalid email; errors associated with controls
+  - compare sheet (create disabled + explained for a domain match);
+    create-separately and skip decisions; Invalid view
+  - "Import 31 rows"; report 34/30/1/1/2/0; decision and conflict notes;
+    no Import action after reload; recent imports
+  - merged company kept its values and gained CSV evidence, no duplicate
+    contact
+  - pagination 25 + 6, drawer from page 2, empty page, country filter,
+    name sort, has-contact filter
+  - company/contact restriction; owner lift; restricted filter; member
+    can't lift but can restrict
+  - 390/360: upload, mapping (44px full-width selects), review cards, bottom
+    compare sheet with focus, 44px choices, import report, cancel with
+    confirmation, filters (44px), Add leads menu fits, bottom navigation,
+    no overflow
+  - zero browser requests to Supabase
+
+
+--------------------------------------------------------------------------------
+25. CODE-QUALITY REVIEW
+--------------------------------------------------------------------------------
+Verified
+  Q1  Workspace ownership: both new tables have an immutable workspace_id.
+      Every link (batch, matched/committed company and contact, matched row,
+      evidence → batch/row) is a composite same-workspace FK (tested).
+  Q2  Import relationships: rows can't move between batches (immutable key);
+      row numbers are unique per batch; raw_data is immutable.
+  Q3  Duplicate decisions: allowed decisions are enforced server-side
+      (isDecisionAllowed) and by DB CHECK for invalid rows. A domain match
+      can't be created separately (app rule + unique index backstop).
+  Q4  Commit idempotency: four layers (§16), tested in DB and unit tests.
+  Q5  Manual-entry normalization: the same Zod schemas and normalize.ts as
+      CSV; the same matchCompany; the same ingest_lead.
+  Q6  Evidence relationships: only non-empty single-field values, ≤ 2 KB,
+      append-only, import references same-workspace and immutable.
+  Q7  Restrictions: P1-E1 role rules unchanged (RLS); member UI explains.
+  Q8  Upload limits: extension and size checked server-side; MIME type not
+      trusted; row/column/cell limits; Server Action body limit 6 MB; content
+      is parsed as text only.
+  Q9  Input validation: every action authenticates, re-authorizes the
+      workspace (findWorkspace), UUID-checks ids, validates with Zod and maps
+      DB errors to fixed messages (no internal details reach the user).
+  Q10 Client/server boundary: no browser DB client. Client components get
+      DTOs. Papa Parse is server-only (checkCsvFile moved to a parser-free
+      module). Bundle scan clean.
+Findings fixed during this review
+  R1  Server component imported a constant from a "use client" module
+      (decision labels rendered blank in the report). Moved to
+      src/lib/imports/classify.ts; the browser check now asserts it.
+  R2  Duplicate DOM ids for decision selects (table + card) → useId.
+  R3  One-tap irreversible "Cancel import" next to the primary action →
+      confirmation step.
+  R4  Add leads menu overflowed at 360px (right-aligned to a left-aligned
+      button) → left-aligned on phones.
+  R5  Step indicator overflowed on phones → compact labels.
+  R6  Filter selects 40px on phones → 44px.
+Follow-ups
+  F1 (Low)  Review pages load all of a batch's rows (≤ 5,000, ≤ ~16 KB each,
+            in 1,000-row requests) to compute counts and filter. Fine for the
+            MVP limit; move counts/filters into SQL if limits grow.
+  F2 (Low)  ingest_lead is callable by any member through the API, with
+            arbitrary (but CHECK-constrained, RLS-scoped) values, which is
+            equivalent to the existing direct-table member rights (P1-E1 F1/F2).
+            Normalized columns remain app-computed.
+  F3 (Low)  A decision can still be changed in the instant between "Import"
+            and the first chunk. The row trigger doesn't block it (the batch
+            is processing, not final). The commit uses whatever decision it
+            reads; there is no integrity impact.
+  F4 (Info) raw_data/normalized_data retention clean-up is not implemented
+            (documented operational task).
+  F5 (Info) Carried: no CSP; forbidden pages return HTTP 200; RLS helper
+            my_workspace_ids() still planned.
+
+
+--------------------------------------------------------------------------------
+26. CANONICAL-DESIGN DEVIATIONS
+--------------------------------------------------------------------------------
+No redesign. The new screens reuse PageHeader, Panel, PanelHeader, Button,
+Field, StatusPill, Alert, ConfigSheet (as the compare, manual company and
+add-contact sheets), the table/card patterns, tokens, the shell, sidebar and
+bottom navigation.
+  G1 Add leads is a primary button with a small menu in the page header
+     (the canonical header action position).
+  G2 The import workflow is a page under Leads (/leads/import) with a step
+     indicator, not a modal, so long files and resumable imports have a
+     stable URL.
+  G3 Filter "chips" in review/report reuse the pill shape with counts.
+  G4 Pagination shows Previous / current / Next ("of M") rather than every
+     page number.
+  G5 The Leads empty state now offers Import a CSV (it previously said
+     ingestion was coming).
+
+
+--------------------------------------------------------------------------------
+27. UNRESOLVED ISSUES
+--------------------------------------------------------------------------------
+  U1  PRE-PRODUCTION BLOCKER — REAL SUPABASE VERIFICATION STILL OPEN
+      (137 DB tests run only on PGlite).
+  U2  Browser checks use the UI-review mock. It imitates the RPCs and only
+      the rules the UI surfaces; constraints are proven in tests/db.
+  U3  database.types.ts still hand-maintained (regenerate with db:types once
+      the local stack runs).
+  U4  Edit company not implemented (optional in the spec; left out to keep
+      scope tight).
+  U5  No full text search; no reusable mapping templates; no retention
+      clean-up job for staged raw data.
+  U6  Phone matching still international-format only (P1-E1 U6).
+  U7  No axe audit / screen-reader pass (carried).
+  U8  Carried: HTTP 200 for forbidden pages; no CSP.
+  U9  1280px and 768px were not screenshotted separately. They share the
+      breakpoints verified at 1440/390/360.
+
+
+--------------------------------------------------------------------------------
+28. SCREENSHOTS (docs/reports/screenshots/P1-E2/)
+--------------------------------------------------------------------------------
+Production build + UI-review mock + fictional generic data (example.test).
+  01-leads-add-menu-desktop.png           Add leads → Add manually / Import CSV
+  02-manual-company-desktop.png           manual company sheet, filled
+  03-manual-duplicate-warning-desktop.png same-domain warning, Use existing
+  04-csv-upload-desktop.png               step 1, recent imports
+  05-csv-column-mapping-desktop.png       mapping with samples and Ignore
+  06-csv-review-desktop.png               review table: matches, errors, decisions
+  07-csv-duplicate-review-desktop.png     compare: imported vs existing
+  08-csv-invalid-rows-desktop.png         Invalid view
+  09-csv-import-summary-desktop.png       report counts + row outcomes
+  10-leads-paginated-filtered-desktop.png filtered, page 1 of 2
+  11-company-restriction-desktop.png      company + contact restricted
+  12-csv-upload-mobile.png                390px
+  13-csv-mapping-mobile.png
+  14-csv-review-mobile.png                summary + cards
+  15-duplicate-review-mobile.png          bottom compare sheet
+  16-import-summary-mobile.png
+  17-leads-filter-mobile.png              filters open
+
+
+--------------------------------------------------------------------------------
+29. RECOMMENDED NEXT STORY
+--------------------------------------------------------------------------------
+First, still: close U1 (enable virtualization + Docker, then supabase start,
+db reset, db:types, SUPABASE_TEST_DB_URL test:db, verify).
+
+Then, with explicit approval only:
+P1-E3 — First Automated Company Discovery Provider:
+  - discovery adapter interface; first provider
+  - search by geography + company criteria
+  - results staged and ingested through THIS pipeline (classification,
+    review decisions, ingest_lead, provider-keyed evidence)
+  - provider usage limits / cost tracking
+Apollo is not to be connected without explicit approval.
+
+P1-E2 stops here. No discovery, provider, enrichment, scoring, calling,
+email or campaign work has been started. The canonical UI remains locked.
+================================================================================

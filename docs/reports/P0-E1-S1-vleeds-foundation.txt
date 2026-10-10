@@ -1,0 +1,597 @@
+================================================================================
+VLEEDS — COMPLETION REPORT
+Story:   P0-E1-S1 — Secure organization/workspace foundation
+Date:    2026-10-07
+Status:  COMPLETE WITH ONE ENVIRONMENT-BLOCKED VERIFICATION
+         (real Supabase stack not yet run: Docker cannot start because hardware
+         virtualization is disabled in this machine's BIOS; see §9 and §10)
+================================================================================
+
+CONTENTS
+  1. Summary
+  2. What was implemented
+  3. Files created / modified
+  4. Schema / migrations added
+  5. RLS policies and privileges
+  6. Tests executed
+  7. Test results
+  8. Screenshots and routes available for review
+  9. Architecture decisions
+ 10. Deviations from the specification
+ 11. Unresolved issues
+ 12. Security findings
+ 13. Quality gate checklist
+ 14. Recommended exact next step
+
+
+--------------------------------------------------------------------------------
+1. SUMMARY
+--------------------------------------------------------------------------------
+A Next.js 16 + TypeScript + Supabase application foundation with:
+
+  - database-enforced multi-tenancy (organizations -> memberships -> workspaces)
+  - deny-by-default privileges and Row Level Security on every table
+  - 36 adversarial tenant-isolation tests (plus 9 unit tests), all passing
+  - an authenticated, responsive application shell with a cross-organization
+    workspace switcher and placeholder Today / Discover / Leads / Campaigns /
+    Settings sections, including loading, empty, error and not-found states
+  - zero Supabase credentials or calls in the browser; all data access is
+    server-side through one Data Access Layer under the user's own session
+  - no business-specific logic: businesses exist only as workspace data,
+    enforced by an automated guard test
+
+Not done in this story, by design: lead discovery, enrichment, calling,
+provider APIs, billing, public sign-up.
+
+
+--------------------------------------------------------------------------------
+2. WHAT WAS IMPLEMENTED (by deliverable)
+--------------------------------------------------------------------------------
+ 1. Repository/application foundation
+    Next.js 16.4 (App Router, Cache Components, Partial Prefetching),
+    React 19.3, TypeScript (strict), Tailwind CSS 4, ESLint (next config),
+    Vitest 5. Git repository initialized (branch main, nothing committed).
+    Toolchain installed on this machine: Node.js 24.19 LTS and Git 2.55 (winget).
+
+ 2. Environment/configuration structure
+    .env.example (documented, committed), .env.local (git-ignored).
+    src/lib/env.ts validates public config with Zod and REFUSES TO START if a
+    secret or service-role key is placed in the public key variable.
+    Only NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY exist.
+    No secret is required to run the app.
+
+ 3. Supabase connection
+    @supabase/ssr server client (src/lib/supabase/server.ts, server-only) and
+    proxy session refresh (src/lib/supabase/proxy.ts). Typed with
+    src/lib/supabase/database.types.ts. supabase/config.toml generated and
+    hardened. Live connection to a running Supabase instance NOT yet exercised
+    (see §10).
+
+ 4. Authentication foundation
+    Supabase Auth email/password. Sign-in/sign-out as Server Actions.
+    Generic credential errors, a separate "unavailable" error,
+    same-origin-only post-login redirect, auth.getUser() everywhere (never
+    getSession()). Proxy redirects unauthenticated requests to /login (UX
+    only). Public sign-up disabled in config; no sign-up UI.
+
+ 5-7. organizations, memberships, workspaces schema
+    Single migration; see §4.
+
+ 8. RLS policies for implemented tables
+    See §5.
+
+ 9. Tenant-isolation tests
+    tests/db/tenancy.test.ts (36 tests). Runs on embedded Postgres (PGlite)
+    with a Supabase-faithful shim, or on a real Supabase DB via
+    SUPABASE_TEST_DB_URL. See §6-7.
+
+10. Authenticated application shell
+    Desktop sidebar + mobile top bar/drawer (src/components/shell/*).
+    Static skeleton frame renders instantly; session/workspace data streams in.
+
+11. Workspace switcher architecture
+    URL-scoped workspaces (/w/{workspaceId}/{section}); switcher lists the
+    RLS-filtered set grouped by organization; switching preserves the section;
+    last-used workspace remembered as an httpOnly cookie hint that is
+    re-validated against RLS. "New workspace" flow (/workspaces/new) lets an
+    invited user create an organization and workspace (business name, domain,
+    website, description) without code changes.
+
+12. Placeholder navigation
+    Today, Discover, Leads, Campaigns, Settings, each re-authorizing the
+    workspace. Settings shows the business profile (data) and the list of
+    configurable prospecting areas (ICP, geographies, titles, buying /
+    exclusion signals, scoring, enrichment providers, calling provider), all
+    marked "Not configured".
+
+13. Loading / empty / error states
+    loading.tsx + skeletons, empty states per section, error.tsx (segment +
+    root) and global-error.tsx that never show raw error messages, uniform
+    "Not available" page for missing or forbidden workspaces, form
+    validation errors, sign-in errors.
+
+14. Architecture decisions
+    docs/architecture/vleeds-tenancy.md §9 (AD-1 to AD-10), summarized in §9.
+
+15. Plan for subsequent schema entities
+    docs/architecture/vleeds-data-model.md (all 10 remaining entities,
+    conventions, RLS performance pattern, delivery order).
+
+
+--------------------------------------------------------------------------------
+3. FILES CREATED / MODIFIED
+--------------------------------------------------------------------------------
+Created (application)
+  src/proxy.ts                                  session refresh, auth redirect, last-workspace hint
+  src/app/route.ts                              "/" -> last/first workspace or onboarding (HTTP 307)
+  src/app/layout.tsx                (modified)  root layout, metadata (noindex)
+  src/app/globals.css               (modified)  design tokens
+  src/app/not-found.tsx                         uniform "Not available"
+  src/app/error.tsx, src/app/global-error.tsx   error boundaries
+  src/app/auth/actions.ts                       signIn / signOut server actions
+  src/app/login/page.tsx, login-form.tsx        sign-in
+  src/app/workspaces/new/page.tsx, new-workspace-form.tsx, actions.ts
+  src/app/w/[workspaceId]/layout.tsx            workspace gate + shell
+  src/app/w/[workspaceId]/page.tsx              -> /today
+  src/app/w/[workspaceId]/loading.tsx, error.tsx
+  src/app/w/[workspaceId]/{today,discover,leads,campaigns,settings}/page.tsx
+  src/components/shell/app-shell.tsx, workspace-switcher.tsx, primary-nav.tsx,
+                       section-page.tsx, skeletons.tsx, status-panels.tsx
+  src/components/ui/primitives.tsx
+  src/lib/dal.ts                                Data Access Layer (server-only)
+  src/lib/home.ts                               home-path resolution (server-only)
+  src/lib/env.ts, navigation.ts, slug.ts
+  src/lib/supabase/server.ts, proxy.ts, database.types.ts
+
+Created (database)
+  supabase/config.toml                          generated + hardened
+  supabase/migrations/20261007000000_tenancy_foundation.sql
+  supabase/seed.sql                             generic local test data only
+
+Created (tests & tooling)
+  tests/db/tenancy.test.ts
+  tests/db/support/db.ts, supabase-shim.sql
+  tests/unit/foundation.test.ts, business-agnostic.test.ts
+  tests/support/server-only-stub.ts
+  vitest.config.mts
+  scripts/check-client-bundle.mjs               client-bundle secret scanner
+  scripts/ui-review/mock-supabase.mjs           UI-review-only mock (not security evidence)
+  scripts/ui-review/review.mjs                  browser smoke checks + screenshots
+
+Created (docs)
+  README.md                         (replaced scaffold README)
+  docs/product/vleeds-product-principles.md
+  docs/architecture/vleeds-tenancy.md
+  docs/architecture/vleeds-data-model.md
+  docs/reports/P0-E1-S1-vleeds-foundation.txt   (this file)
+  docs/reports/screenshots/P0-E1-S1/*.png        13 screenshots
+
+Modified (config)
+  package.json        name, engines, scripts, dependencies
+  next.config.ts      security headers, poweredByHeader off
+  .gitignore          keep .env.example; ignore supabase/.temp
+  .env.example (new), .env.local (new, git-ignored, placeholders only)
+
+Removed: scaffold src/app/page.tsx and public/*.svg.
+Kept: AGENTS.md (generated by Next.js; re-created by `next dev` if removed).
+
+Dependencies added
+  runtime: @supabase/ssr 0.12.7, @supabase/supabase-js 2.117.3, zod 4.6.5,
+           lucide-react 1.52.0, server-only
+  dev:     vitest 5.0.3, @electric-sql/pglite 0.5.8, pg 8.23.1, @types/pg,
+           supabase (CLI) 2.120.0, @types/node ^24 (was ^20; see §10)
+
+
+--------------------------------------------------------------------------------
+4. SCHEMA / MIGRATIONS ADDED
+--------------------------------------------------------------------------------
+Migration: supabase/migrations/20261007000000_tenancy_foundation.sql
+
+Schema `private` (not exposed by the Data API; usage granted to authenticated
+and service_role only).
+
+Type public.membership_role = ('owner','admin','member')
+
+public.organizations
+  id uuid pk, name text (1-120), slug text unique (kebab-case, 2-64),
+  created_by uuid -> auth.users (set null), created_at, updated_at
+
+public.memberships
+  id uuid pk, organization_id -> organizations (cascade),
+  user_id -> auth.users (cascade), role membership_role default 'member',
+  created_at, updated_at, UNIQUE (organization_id, user_id),
+  index on user_id
+
+public.workspaces
+  id uuid pk, organization_id -> organizations (cascade), name (1-120),
+  slug (unique per org), description (<=2000), website_url (http/https),
+  primary_domain (validated hostname), logo_url (https), settings jsonb
+  (object), archived_at, created_by default auth.uid(), created_at,
+  updated_at, UNIQUE (organization_id, slug), index on organization_id
+
+Functions
+  private.is_org_member(uuid)                         SECURITY DEFINER, search_path=''
+  private.has_org_role(uuid, membership_role[])       SECURITY DEFINER, search_path=''
+  private.is_workspace_member(uuid)                   SECURITY DEFINER, search_path=''
+                                                      (for all future workspace tables)
+  private.set_updated_at()                            trigger
+  private.prevent_tenant_key_change(cols...)          trigger
+  private.protect_last_owner()                        trigger, SECURITY DEFINER
+  public.create_organization(name, slug) -> uuid      SECURITY DEFINER; creates
+                                                      org + caller as owner;
+                                                      authenticated only
+
+Triggers
+  *_set_updated_at on all three tables
+  memberships_tenant_keys_immutable  (organization_id, user_id)
+  workspaces_tenant_keys_immutable   (organization_id, created_by)
+  memberships_protect_last_owner     (update/delete)
+
+Seed (supabase/seed.sql, local only): 5 users @example.test, "Example Org A"
+(Alpha, Beta) and "Example Org B" (Gamma), memberships covering owner, admin,
+member, multi-org and no-org cases. Public-schema inserts verified against
+the constraints in PGlite. The auth.users / auth.identities part needs the
+real stack (see §11).
+
+
+--------------------------------------------------------------------------------
+5. RLS POLICIES AND PRIVILEGES
+--------------------------------------------------------------------------------
+RLS is ENABLED on organizations, memberships and workspaces (all public tables).
+
+Privileges (deny by default):
+  anon:           nothing on any table or function
+  authenticated:
+    organizations  SELECT; UPDATE (name, slug)
+    memberships    SELECT, DELETE; INSERT (organization_id, user_id, role); UPDATE (role)
+    workspaces     SELECT; INSERT (organization_id, name, slug, description,
+                   website_url, primary_domain, logo_url, settings);
+                   UPDATE (name, slug, description, website_url, primary_domain,
+                   logo_url, settings, archived_at)
+  service_role:   all (bypasses RLS; not used by the application)
+  Local config: auto_expose_new_tables = false
+
+Policies (all TO authenticated):
+  organizations_select_member       SELECT  is_org_member(id)
+  organizations_update_admin        UPDATE  has_org_role(id, owner|admin)  [using + check]
+  (no INSERT policy: use create_organization; no DELETE policy in P0)
+
+  memberships_select_same_org       SELECT  is_org_member(organization_id)
+  memberships_insert_admin          INSERT  owner, OR admin AND role <> 'owner'
+  memberships_update_admin          UPDATE  owner, OR admin AND role <> 'owner' [using + check]
+  memberships_delete_admin_or_self  DELETE  self, OR owner, OR admin AND role <> 'owner'
+
+  workspaces_select_member          SELECT  is_org_member(organization_id)
+  workspaces_insert_admin           INSERT  has_org_role(organization_id, owner|admin)
+  workspaces_update_admin           UPDATE  has_org_role(organization_id, owner|admin) [using + check]
+  (no DELETE policy in P0: archive via archived_at)
+
+
+--------------------------------------------------------------------------------
+6. TESTS EXECUTED
+--------------------------------------------------------------------------------
+A. Tenant-isolation suite: tests/db/tenancy.test.ts (36 tests)
+   Each attempt runs in a transaction with SET LOCAL ROLE and
+   request.jwt.claims, exactly as PostgREST does, and is always rolled back;
+   denied writes are re-checked as the DB owner.
+   - schema hardening (4): RLS on every public table; no anon privileges;
+     private helpers not executable by anon; search_path pinned on every
+     SECURITY DEFINER function
+   - anonymous (5): cannot read any of the 3 tables, call create_organization,
+     or insert
+   - cross-organization reads (8): by id; by organization_id; via join;
+     membership listing; outsider sees nothing; multi-org user sees exactly
+     the union; helper functions deny foreign org/workspace
+   - cross-organization writes (11): create workspace in foreign org; update
+     foreign workspace/org; add self to foreign org (member/admin/owner);
+     outsider self-join; delete/alter foreign memberships; MOVE a workspace
+     to another org (incl. when the caller owns both); re-point a membership's
+     org/user; spoof created_by; direct org insert; delete org/workspace
+   - roles (5): member restrictions; admin capabilities; admin cannot
+     create/modify/remove owners or self-promote; last owner cannot
+     leave/demote; member can leave and then loses access
+   - organization creation (2): creator becomes sole owner; invalid slug
+     rejected
+   - service role (1): bypasses RLS (documents why it must stay server-side)
+
+B. Mutation check of the suite: a temporary migration replaced the workspace
+   SELECT policy with USING (true) and disabled RLS on memberships.
+   Result: 12 tests FAILED (as required), then the file was removed.
+
+C. Unit tests (9): env validation incl. secret-key rejection; navigation
+   (paths, section preservation, UUID validation, open-redirect protection);
+   slug rules match the DB constraint; business-agnostic guard (no named
+   businesses or specific providers in src/, migrations or seed).
+
+D. Static checks: ESLint; `next typegen && tsc --noEmit`; `next build`.
+
+E. Client-bundle secret scan: scripts/check-client-bundle.mjs over
+   .next/static. Canary check: a planted sb_secret_ value and a
+   SUPABASE_SERVICE_ROLE_KEY reference were both detected (exit 1); the canary
+   was then removed.
+
+F. Browser/end-to-end smoke checks (scripts/ui-review/review.mjs, headless
+   Chrome against the production build + UI-review mock backend), 22 checks:
+   unauthenticated redirects (/, workspace route, /workspaces/new -> 307
+   /login with safe ?next); security headers; generic bad-password error;
+   sign-in lands on workspace; switcher groups by org; switching preserves
+   the section and updates the active workspace; "/" honours the last-
+   workspace cookie; signed-in /login bounce; sign-out and post-sign-out
+   lockout; foreign / nonexistent / malformed workspace -> identical
+   "Not available"; single-org user's switcher excludes foreign workspaces;
+   mobile has no horizontal overflow; no-membership user -> onboarding;
+   browser made ZERO requests to Supabase; no secrets in 279 browser-visible
+   responses; session tokens never appear in HTML/RSC payloads.
+   NOTE: these checks validate application wiring and UI only. Isolation
+   evidence comes from suite A against real Postgres RLS.
+
+G. Dependency audit: npm audit.
+
+
+--------------------------------------------------------------------------------
+7. TEST RESULTS
+--------------------------------------------------------------------------------
+Final `npm run verify` (lint -> typecheck -> test -> build -> check:bundle): EXIT 0
+
+  lint ................................ PASS (0 problems)
+  typecheck ........................... PASS
+  vitest .............................. PASS  3 files, 45/45 tests
+                                              (36 tenant-isolation + 9 unit), ~24s
+  build ............................... PASS  (Next.js 16.4.0, Turbopack)
+  check:bundle ........................ PASS  18 client files, 0 findings
+  mutation check of RLS suite ......... PASS  (12/36 failed under broken policies)
+  bundle-scanner canary ............... PASS  (2/2 planted leaks detected)
+  browser smoke checks ................ PASS  22/22 (fresh server, clean log)
+  npm audit --omit=dev ................ 0 vulnerabilities
+  npm audit (incl. dev) ............... 5 high, dev-only (see §12)
+
+DB driver for suite A: PGlite (embedded Postgres) with
+tests/db/support/supabase-shim.sql. The real-Supabase run
+(SUPABASE_TEST_DB_URL) is PENDING; see §10/§14.
+
+Defects found and fixed during verification:
+  - After sign-in the client router stalled on "/" (route-handler redirect not
+    followed by client navigation). Fixed: signIn resolves the destination
+    itself (src/lib/home.ts); links to "/" use full navigation.
+  - supabase-js read the clock inside Cache Components' runtime App Shell
+    prerender ("Date.now() while prerendering" errors on every workspace
+    route). Fixed: createSupabaseServerClient awaits connection() first;
+    server log clean afterwards.
+  - Sign-in reported "Incorrect email or password" when Auth was
+    unreachable. Fixed: distinct "unavailable" message.
+
+
+--------------------------------------------------------------------------------
+8. SCREENSHOTS AND ROUTES AVAILABLE FOR REVIEW
+--------------------------------------------------------------------------------
+Screenshots (docs/reports/screenshots/P0-E1-S1/), captured from the production
+build with the UI-review mock backend and generic seed data:
+  01-login.png                    sign-in
+  02-login-error.png              failed sign-in (generic error)
+  03-today-desktop.png            shell + Today empty state
+  04-leads.png                    Leads empty state
+  05-discover.png                 Discover empty state
+  06-campaigns.png                Campaigns empty state
+  07-workspace-switcher.png       switcher, two organizations
+  08-settings.png                 business profile + configuration areas
+  09-foreign-workspace-404.png    another org's workspace -> Not available
+  10-mobile-today.png             390px mobile layout
+  11-mobile-drawer.png            mobile navigation drawer
+  12-onboarding.png               first-workspace setup
+  13-onboarding-validation.png    form validation state
+
+Routes
+  /                               -> last/first workspace, or /workspaces/new (307)
+  /login                          sign-in (static)
+  /workspaces/new                 create organization and/or workspace
+  /w/{workspaceId}                -> /w/{workspaceId}/today
+  /w/{workspaceId}/today          placeholder
+  /w/{workspaceId}/discover       placeholder
+  /w/{workspaceId}/leads          placeholder
+  /w/{workspaceId}/campaigns      placeholder
+  /w/{workspaceId}/settings       business profile (read-only) + config areas
+
+Seed workspace ids: Alpha 20000000-0000-4000-a000-00000000000a,
+Beta ...0b, Gamma ...0c. Users and password: see README.md.
+
+
+--------------------------------------------------------------------------------
+9. ARCHITECTURE DECISIONS (full table: docs/architecture/vleeds-tenancy.md §9)
+--------------------------------------------------------------------------------
+AD-1  Organization = tenant; workspace = a business inside it.
+AD-2  Access via org membership only; per-workspace ACL deferred (can be added
+      inside private.is_workspace_member without changing table policies).
+AD-3  SECURITY DEFINER helpers in an unexposed `private` schema.
+AD-4  Tenant keys immutable (trigger + no column grant), not just policy-checked.
+AD-5  No browser Supabase client; all data access server-side via the DAL.
+AD-6  Workspace id in the URL; no server-side "current workspace" state.
+AD-7  Missing and forbidden workspaces are indistinguishable.
+AD-8  No deletes of organizations/workspaces in P0 (archive instead).
+AD-9  DB tests portable: PGlite + Supabase shim, or real Supabase via env var.
+AD-10 Keep Next.js 16 Cache Components; Supabase work forced to request time.
+Also: a "lead" will be a company within a workspace (no separate leads table);
+business criteria are versioned, validated jsonb; provider integrations are
+generic adapters chosen per workspace; provider secrets go in Supabase Vault.
+
+
+--------------------------------------------------------------------------------
+10. DEVIATIONS FROM THE SPECIFICATION
+--------------------------------------------------------------------------------
+D1  Real Supabase stack not run. Docker Desktop (chosen by the owner) cannot
+    run because "Virtualization Enabled In Firmware: No" on this HP Pavilion
+    15-cd0xx. The RLS suite ran against embedded Postgres (PGlite) with a shim
+    that reproduces Supabase's roles, auth.uid() and default grants, using the
+    exact production migration. The identical suite is ready to run against
+    the local stack.
+D2  The application has not been exercised against a live Supabase Auth /
+    PostgREST. Authenticated UI and screenshots used a UI-review mock
+    (scripts/ui-review/mock-supabase.mjs), clearly marked as not security
+    evidence.
+D3  database.types.ts is hand-written to match the migration; regenerate with
+    `npm run db:types` once the stack runs.
+D4  Added /workspaces/new (create organization + workspace). It goes slightly
+    beyond "shell only", but without it a new business could not create a
+    workspace without SQL, and the switcher and empty-onboarding states
+    couldn't be validated. No public sign-up was added.
+D5  @types/node raised from ^20 to ^24 (Vitest 5 peer requirement; matches
+    Node 24 runtime).
+D6  Git repository initialized but no commit made (left to the owner).
+
+
+--------------------------------------------------------------------------------
+11. UNRESOLVED ISSUES
+--------------------------------------------------------------------------------
+U1  BLOCKER for full verification: enable AMD-V/SVM in BIOS, install Docker
+    Desktop + WSL2, run the real-stack checks (§14).
+U2  seed.sql auth.users/auth.identities inserts are unverified until the real
+    stack runs (the public-schema part is verified).
+U3  Forbidden/unknown workspace routes return HTTP 200 with the "Not available"
+    page (the check streams inside Suspense), not HTTP 404. The response is
+    identical for all cases and no data is exposed. Fix option: resolve
+    workspace access in the proxy and return a real 404.
+U4  `next dev` was not exercised (production build only). Dev-mode
+    instant-navigation validation may print warnings for session-dependent
+    routes; these are advisory.
+U5  If workspace creation fails after a new organization was created, the
+    organization remains (the form then offers it, so no duplicate is
+    created). A single RPC for org + workspace would make this atomic.
+U6  Seed data and the mock duplicate the same generic fixtures; keep them in sync.
+U7  Cold builds take 1-2 minutes on this machine (AMD A-series, 11 GB RAM).
+
+
+--------------------------------------------------------------------------------
+12. SECURITY FINDINGS
+--------------------------------------------------------------------------------
+Verified
+  S1  No Supabase URL, key, token or service-role reference in the client
+      bundle; the browser makes zero Supabase requests.
+  S2  No service-role code path exists in the application.
+  S3  anon has no table privileges; RLS on all tables; tenant keys immutable;
+      cross-org reads/writes fail (36 tests + mutation check).
+  S4  SECURITY DEFINER functions pin search_path='' and are not callable by anon.
+  S5  Session tokens never appear in HTML/RSC payloads. Errors never render
+      raw messages. Sign-in errors don't enumerate accounts. Open-redirect
+      protection is in place.
+  S6  Security headers: X-Frame-Options DENY, nosniff,
+      strict-origin-when-cross-origin, Permissions-Policy; X-Powered-By off.
+  S7  Public sign-up disabled; minimum password 12; secure password change on.
+
+Open / recommendations
+  F1  (Low)    No Content-Security-Policy yet. Add a nonce-based CSP via the
+               proxy before external tenants.
+  F2  (Low)    Dev-only dependency advisories: 5 "high" in the ESLint toolchain
+               (braces/micromatch via @next/eslint-plugin-next). npm's only
+               fix is a breaking downgrade to eslint-config-next 14, so it was
+               not applied. Not shipped to production (prod audit: 0).
+  F3  (Info)   Any authenticated user can create organizations. Acceptable
+               while sign-up is invite-only; revisit before enabling sign-up.
+  F4  (Info)   Permissions-Policy denies microphone. Browser-based calling
+               will need microphone=(self).
+  F5  (Info)   HTTP 200 for forbidden workspace pages (U3); no data impact.
+  F6  (Info)   Hosted Supabase projects default to auto-exposing new tables.
+               The migration revokes and grants explicitly, so it is safe
+               either way, but set "auto expose new tables" off in the hosted
+               project too.
+  F7  (Info)   .env.local currently holds placeholders only; real keys must
+               never be committed (.gitignore verified).
+
+
+--------------------------------------------------------------------------------
+13. QUALITY GATE CHECKLIST
+--------------------------------------------------------------------------------
+  [x] lint / typecheck / build
+  [x] auth boundaries verified (HTTP 307s, page-level re-authorization,
+      sign-out lockout, server actions re-check the session)
+  [x] RLS enabled on all tenant-owned tables (catalog test)
+  [x] cross-organization reads and writes attempted and confirmed to fail
+  [x] browser bundle and network inspected for exposed secrets
+  [x] workspace switching never exposes another organization's records
+      (RLS-filtered source, plus a browser check of the single-org switcher
+      and foreign-id access)
+  [x] no business-specific logic in application code (guard test + repo grep)
+  [ ] the same RLS suite against the real local Supabase stack (blocked: U1)
+
+
+--------------------------------------------------------------------------------
+14. RECOMMENDED EXACT NEXT STEP
+--------------------------------------------------------------------------------
+Before P0-E1-S2, close the one open verification item for P0-E1-S1:
+
+  1. Reboot -> HP BIOS (F10) -> Configuration -> enable "Virtualization
+     Technology" (AMD-V/SVM) -> save.
+  2. Install WSL2 and Docker Desktop:
+       wsl --install --no-distribution
+       winget install --id Docker.DockerDesktop -e
+     Reboot, then start Docker Desktop.
+  3. In the repo:
+       npx supabase start
+       npx supabase db reset
+     Put the printed Publishable key in .env.local, then run:
+       npm run db:types
+       $env:SUPABASE_TEST_DB_URL="postgresql://postgres:postgres@127.0.0.1:54322/postgres"; npm run test:db
+       npm run build; npm run check:bundle
+       npm run dev   -> sign in as multi@example.test / vleeds-dev-password
+  4. Append the results to this report.
+
+Then, with approval, P0-E1-S2 (proposed): workspace business-profile editing
+and the icp_profiles table (geographies, ideal-customer criteria,
+decision-maker titles, buying/exclusion signals, scoring model as validated
+data), with RLS and adversarial tests. No provider connections, discovery or
+enrichment.
+
+P0-E1-S1 stops here. No further features will be started without explicit
+approval.
+================================================================================
+
+
+================================================================================
+ADDENDUM — REAL SUPABASE VERIFICATION — ATTEMPT 1 — BLOCKED (NOT CLOSED)
+Date:   2026-10-07 (local; 2026-10-08 UTC)
+Story:  P0-E1-S1A, Stage A (A1)
+Result: FAILED AT A1. Hard gate applied: Stage B not started, no code or UI
+        changes made.
+================================================================================
+
+What was attempted
+  A1  npx.cmd supabase start   (Supabase CLI 2.120.0)
+      -> {"_tag":"Error","error":{"code":"DockerLifecycleInspectError",
+          "message":"failed to inspect container health: Error response from
+          daemon: Docker Desktop is unable to start"}}   exit 1
+      `npx.cmd` executed normally, so this is NOT a PowerShell
+      execution-policy issue.
+
+Diagnosis (evidence)
+  - Win32_Processor (AMD A12-9720P): VirtualizationFirmwareEnabled = False
+  - systeminfo: "Virtualization Enabled In Firmware: No" (VM Monitor Mode
+    Extensions: Yes, SLAT: Yes; so the CPU supports AMD-V but it is OFF in
+    the BIOS/UEFI)
+  - Docker Desktop is installed and its UI/backend processes are running, but
+    `docker info` -> "Docker Desktop is unable to start"
+  - WSL 3.0.1.0 installed (kernel 6.18.40.1-1); `wsl --status` reports
+    "WSL is finishing an upgrade..." and no distributions. Docker Desktop log:
+    "checking WSL version: ... executing wsl --version: ... An error occurred"
+  - com.docker.service and vmcompute: Stopped
+
+Conclusion
+  The original blocker U1 (hardware virtualization disabled in firmware) is
+  STILL PRESENT. WSL2/Docker cannot run any VM until it is enabled, whatever
+  their install state. Steps A2-A7 were not run. No result in this report is
+  changed by this attempt.
+
+Status of quality-gate item
+  [ ] the same RLS suite against the real local Supabase stack
+      STILL OPEN (blocked: U1, re-confirmed 2026-10-07)
+
+Required to unblock (needs the developer at the machine)
+  1. Fully shut down (not Restart) -> power on -> press Esc, then F10 for HP
+     BIOS Setup.
+  2. Configuration (or Advanced -> System Options) -> "Virtualization
+     Technology" (AMD-V / SVM) -> Enabled -> F10 Save & Exit.
+  3. In Windows, confirm Task Manager -> Performance -> CPU shows
+     "Virtualization: Enabled" (or `systeminfo` says "A hypervisor has been
+     detected").
+  4. Admin PowerShell: wsl --update ; wsl --shutdown ; then reboot.
+  5. Start Docker Desktop and wait for "Engine running"; `docker info` must
+     succeed.
+  6. Re-run P0-E1-S1A from A1.
+================================================================================

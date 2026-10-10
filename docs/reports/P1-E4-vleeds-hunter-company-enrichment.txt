@@ -1,0 +1,788 @@
+================================================================================
+VLEEDS — COMPLETION REPORT
+Story:   P1-E4 — Hunter Durable Company Enrichment Foundation
+Date:    2026-10-09
+Status:  COMPLETE (development verification on embedded Postgres/PGlite,
+         mocked provider).
+
+  ******************************************************************
+  *  REAL SUPABASE PRE-PRODUCTION VERIFICATION: STILL OPEN          *
+  *  All six DB suites (172 tests: 36 tenancy + 41 ICP + 40 lead    *
+  *  core + 20 imports + 18 discovery + 17 enrichment) have run     *
+  *  ONLY on PGlite with the Supabase shim, never on a real         *
+  *  Supabase/Postgres stack. Docker is still unavailable. Not      *
+  *  attempted in this story. Mandatory gate before production.     *
+  ******************************************************************
+
+  HUNTER AUTOMATED TESTING:
+  MOCKED — NO REAL CREDITS CONSUMED
+
+  LIVE HUNTER TEST:
+  NOT RUN — HUNTER_API_KEY NOT CONFIGURED
+
+  GOOGLE TRANSIENT CONTENT: never persisted. A transient Google name is
+  used only as Domain Finder input for one request. A database CHECK forbids
+  a stored name on discovery-reference runs. The only Google data written
+  by P1-E4 is the Place ID identity link (lead_sources, no value).
+================================================================================
+
+CONTENTS
+  1 Summary                      12 Company schema extension    23 Existing-company enrichment
+  2 Files created                13 Google transient handoff    24 Responsive behaviour
+  3 Files modified               14 Enrichment runs/results     25 Accessibility
+  4 Migration/schema             15 Deduplication               26 Tests added
+  5 Enrichment provider abstr.   16 Merge behaviour             27 Test results
+  6 Hunter adapter               17 Commit through ingest_lead  28 Live Hunter smoke-test status
+  7 Hunter configuration         18 Hunter source evidence      29 Code-quality review
+  8 Domain Finder                19 Google Place ID link        30 Canonical-design deviations
+  9 Direct-domain flow           20 Provider usage              31 Unresolved issues
+ 10 Company Enrichment           21 Credit estimates            32 Screenshots
+ 11 Durable field mapping        22 Discover integration        33 Exact recommended next story
+
+
+--------------------------------------------------------------------------------
+1. SUMMARY
+--------------------------------------------------------------------------------
+A selected business can now become a durable Vleeds company with
+provider-licensed data:
+  - Discover: a result saved for enrichment gets "Find company data". The
+    open search's transient name runs the free domain lookup. The user
+    picks or types a domain and presses "Enrich company · estimated 0.2
+    credit". Hunter company data is normalized and matched (New / Existing
+    company / Possible duplicate). The user chooses Create / Merge / Skip,
+    and the write goes through the existing ingest_lead pipeline with Hunter
+    evidence. The Place ID is linked to the committed company, so later
+    searches show "Existing company".
+  - It also works without Google:
+      · Discover → Company data → "Enrich a company" (name or domain)
+      · references saved in earlier searches (the user types a name/domain)
+      · Leads → company drawer → "Enrich company"
+  - The generic CompanyEnrichmentProvider contract and server-only registry
+    keep every Hunter request/response shape inside one adapter folder.
+  - Credits:
+      · every Hunter request is accounted with an ESTIMATED credit figure
+      · a compact monthly usage indicator; no hard-coded quota
+      · no automatic or bulk enrichment
+  - Not done (by design): contacts/decision-makers, Hunter Domain Search /
+    Email Finder / Email or Combined Enrichment / Discover, Apollo, scoring,
+    outreach.
+Quality gate: npm.cmd run verify EXIT 0 (361/361 tests). Browser reviews:
+P1-E4 configured 62/62 + not configured 8/8; regressions P1-E3 57/57 + 8/8,
+P1-E2 81/81, P1-E1 40/40, S2 66/66, S1A 50/50.
+
+
+--------------------------------------------------------------------------------
+2. FILES CREATED
+--------------------------------------------------------------------------------
+Database
+  supabase/migrations/20261012000000_company_enrichment_hunter.sql
+Provider layer
+  src/lib/providers/endpoint-override.ts        shared loopback-only dev override
+  src/lib/providers/company-enrichment/types.ts generic contract, capabilities,
+                                                DomainSuggestion, EnrichedCompany,
+                                                usage/credit types
+  .../company-enrichment/registry.ts            server-only; HUNTER_API_KEY /
+                                                HUNTER_API_ENDPOINT
+  .../company-enrichment/hunter/usage.ts        endpoints, credit rule, estimate
+  .../company-enrichment/hunter/schemas.ts      the response parts Vleeds reads
+  .../company-enrichment/hunter/client.ts       GET + X-API-KEY, timeout, bounded
+                                                retry, status mapping
+  .../company-enrichment/hunter/mapper.ts       Domain Finder + company mapping
+  .../company-enrichment/hunter/adapter.ts      CompanyEnrichmentProvider
+Enrichment domain
+  src/lib/enrichment/model.ts    input schemas, transient-name rule, decisions,
+                                 view types, fixed messages, credit format
+  src/lib/enrichment/plan.ts     lead-core normalization, dedupe classification,
+                                 commit planning (P1-E2 planner), review preview
+  src/lib/enrichment/service.ts  server orchestration of one run
+DAL
+  src/lib/dal/enrichment.ts      runs, results, matching inputs, waiting
+                                 references, commit via ingest_lead
+Server actions
+  src/app/w/[workspaceId]/enrichment/actions.ts  start, resolve domains, enrich
+                                                 domain, retry, save
+                                                 (create/merge/skip + commit),
+                                                 cancel
+UI (src/components/enrichment/)
+  enrichment-sheet.tsx       the 4-stage sheet
+  company-data-panel.tsx     Discover "Company data" panel (usage, standalone
+                             entry, saved references)
+  enrich-company-button.tsx  company drawer action
+Tests, fixtures, tooling
+  tests/unit/enrichment.test.ts            35 unit tests
+  tests/db/enrichment.test.ts              17 data-boundary tests (PGlite)
+  tests/fixtures/hunter.ts                 fictional Hunter responses
+  scripts/ui-review/review-enrichment.mjs  70 browser checks (2 phases),
+                                           screenshots 01–15
+Docs
+  docs/product/vleeds-company-enrichment.md
+  docs/providers/hunter.md (setup, API, credits, fields, smoke test)
+  docs/reports/P1-E4-vleeds-hunter-company-enrichment.txt (this file)
+  docs/reports/screenshots/P1-E4/*.png (15)
+
+
+--------------------------------------------------------------------------------
+3. FILES MODIFIED
+--------------------------------------------------------------------------------
+  src/lib/lead-core/schemas.ts          companyInputSchema + industry,
+                                        description; field labels for
+                                        industry/description/tags/provider
+                                        reference
+  src/lib/lead-core/views.ts            CompanyDetail + industry, description
+  src/lib/imports/rows.ts               NormalizedCompany + optional industry,
+                                        description
+  src/lib/imports/ingest.ts             source "api"; provider-keyed evidence;
+                                        industry/description columns + evidence;
+                                        2 KB evidence fit
+  src/lib/imports/merge.ts              industry/description fill rules; source
+                                        label in conflict notes (CSV text
+                                        unchanged: "import")
+  src/lib/imports/commit.ts             options {provider, sourceLabel}
+                                        (CSV default unchanged)
+  src/lib/dal/companies.ts              reads industry/description
+  src/lib/dal/provider-usage.ts         recordEnrichmentUsage,
+                                        enrichmentUsageSummary,
+                                        enrichmentRunCreditMillis
+  src/lib/dal/index.ts                  exports
+  src/lib/providers/company-discovery/registry.ts  uses the shared override
+                                        helper (same behaviour)
+  src/lib/supabase/database.types.ts    + 2 tables, columns, ingest_lead args
+                                        (hand-maintained)
+  src/app/w/[workspaceId]/discover/page.tsx   enrichment info for Discover
+  src/app/w/[workspaceId]/leads/page.tsx      enrichment info for the drawer
+  src/app/w/[workspaceId]/leads/actions.ts    passes industry/description through
+  src/components/discover/discover-workspace.tsx  Company data panel + sheet;
+                                        updates the open search after a commit
+  src/components/discover/discover-results.tsx    "Find company data" on
+                                        references saved for enrichment
+  src/components/leads/company-drawer.tsx  Industry, Description; "Enrich
+                                        company"
+  src/components/settings/config-sheet.tsx  optional pendingLabel, hideCancel
+                                        (defaults unchanged)
+  scripts/check-client-bundle.mjs       + HUNTER_API_KEY / HUNTER_API_ENDPOINT
+                                        names, api.hunter.io, provider paths
+  scripts/ui-review/mock-supabase.mjs   fictional Hunter endpoints, enrichment
+                                        tables, ingest_lead enrichment path
+  tests/unit/business-agnostic.test.ts  "hunter.io" only in its adapter folder;
+                                        X-API-KEY and provider paths only in the
+                                        adapter; P1-E4 fixture names banned from
+                                        runtime
+  .env.example                          HUNTER_API_KEY (+ dev-only endpoint)
+  docs/architecture/vleeds-data-model.md  §3e, entity map, delivery order
+  docs/product/vleeds-discovery.md      §8a enrichment hand-off
+  docs/product/vleeds-lead-core.md      industry/description, provider evidence,
+                                        drawer
+NOT modified: earlier migrations, roles, auth, shell/navigation, design tokens,
+Settings.
+
+
+--------------------------------------------------------------------------------
+4. MIGRATION / SCHEMA (20261012000000_company_enrichment_hunter.sql)
+--------------------------------------------------------------------------------
+  companies           + industry (≤200), description (≤2000); member
+                      insert/update grants
+  company_enrichment_runs
+                      input_kind, discovery_candidate_id, target_company_id,
+                      manual_company_name, requested/resolved_domain, status
+                      (draft … failed), error_code, match_state/reason,
+                      matched_company_id, decision, committed_company_id,
+                      commit_result, commit_notes, timestamps
+  company_enrichment_results
+                      one per run: normalized durable fields, tags (≤20),
+                      match
+  provider_usage_events
+                      + enrichment_run_id (composite FK)
+                      + estimated_credit_millis (0–1,000,000 or NULL)
+                      + statuses quota_exhausted, restricted
+Relationships: every link is a composite same-workspace FK (candidate,
+target/matched/committed company, run, usage → run).
+CHECKs:
+  - discovery_reference ⇒ candidate AND no stored name
+  - per-kind input
+  - failed ⇒ code; completed ⇒ time + result; created/merged ⇒ company
+  - existing_company ⇒ company
+  - employee range; size limits
+Triggers:
+  - guard_enrichment_run: final states frozen; completed only from review
+    or processing
+  - guard_enrichment_result: only while enriching, same provider
+  - updated_at; immutable keys
+  - guard_discovery_candidate (replaced): on a finished search only the
+    needs_enrichment → selected/existing_company link is allowed
+  - refresh_discovery_counts (replaced): updates the run only when the
+    counts change
+Indexes:
+  runs     (workspace_id, created_at desc) · (workspace_id, status) ·
+           (discovery_candidate_id) WHERE NOT NULL
+  results  UNIQUE (enrichment_run_id) · (workspace_id, primary_domain) ·
+           (workspace_id, external_record_id) WHERE NOT NULL
+  usage    (enrichment_run_id) WHERE NOT NULL
+ingest_lead was replaced (drop + create, same leading arguments) to add
+p_enrichment_run_id and p_notes (§17).
+RLS: members select/insert/update runs, select/insert results. Nothing for
+anon, no deletes, column-level grants.
+
+
+--------------------------------------------------------------------------------
+5. ENRICHMENT PROVIDER ABSTRACTION
+--------------------------------------------------------------------------------
+CompanyEnrichmentProvider:
+  - providerKey, label
+  - isConfigured(), getCapabilities()
+  - enrichmentCreditEstimate()
+  - resolveDomain({companyName, limit})
+  - enrichCompany({domain})
+  - normalizeCompany(raw)
+Capabilities: companyEnrichment, domainResolution, durableCompanyFields,
+durableExternalId, usageCredits.
+Generic outputs: DomainSuggestion {domain, companyName, confidenceLabel?,
+emailCount?}; EnrichedCompany (provider-neutral fields); EnrichmentUsage
+{operation, counts, status, estimatedCreditMillis, creditRule}; error codes
+(not_found, no_suggestions, quota_exhausted, rate_limited, restricted, …).
+Registry (server-only): DEFAULT_ENRICHMENT_PROVIDER = hunter. A test keeps
+"hunter.io", X-API-KEY and the Hunter paths inside the adapter folder.
+
+
+--------------------------------------------------------------------------------
+6. HUNTER ADAPTER
+--------------------------------------------------------------------------------
+  - GET only, base https://api.hunter.io/v2.
+  - Key in the X-API-KEY header, never in the URL (unit-tested).
+  - Timeout 10 s via AbortController.
+  - Retry: one bounded retry, only for network errors, timeouts and 5xx.
+    Never retried: 400/422, 401, 403 (rate limit), 429 (quota), 404, 451
+    (unit-tested).
+  - Error bodies are not read; status → category → fixed message.
+  - Only Domain Finder and Company Enrichment are called.
+
+
+--------------------------------------------------------------------------------
+7. HUNTER CONFIGURATION
+--------------------------------------------------------------------------------
+  - HUNTER_API_KEY: server environment only; read at request time; never
+    NEXT_PUBLIC_ (that name is ignored, unit-tested); absent from the
+    browser bundle (bundle scan).
+  - HUNTER_API_ENDPOINT: dev/review only, loopback hosts only, ignored when
+    VERCEL_ENV=production (shared helper, unit-tested).
+  - Without a key: Discover/Leads load; "Company enrichment is not configured
+    yet."; no enrichment actions (browser-verified).
+  - Setup steps: docs/providers/hunter.md §1.
+
+
+--------------------------------------------------------------------------------
+8. DOMAIN FINDER
+--------------------------------------------------------------------------------
+  - Request: company (whitespace collapsed, ≥ 3 characters; shorter names
+    are refused before any request), limit ≤ 5. perfect_match is not sent.
+  - Mapping: domains normalized with the lead-core helper, duplicates and
+    invalid hosts dropped. companyName is kept; confidenceLabel "Exact name
+    match" when the names agree; emailCount is a size hint. Logo ignored.
+  - 404 or empty → "no suggestions" (the user types a domain).
+  - Nothing is auto-chosen without review: the first suggestion is
+    preselected, but the user always confirms through the credit-labelled
+    button.
+  - Beta isolation: schema + mapper only. UI and DB never see the raw shape;
+    suggestions are not stored.
+
+
+--------------------------------------------------------------------------------
+9. DIRECT-DOMAIN FLOW
+--------------------------------------------------------------------------------
+"Look up by: Domain" (or a known company domain) skips Domain Finder. The
+input is normalized by normalizeDomain (e.g. "https://www.X.example.test/about"
+→ "x.example.test"), and the run (input_kind domain / existing_company)
+goes straight to Company Enrichment on the explicit click.
+
+
+--------------------------------------------------------------------------------
+10. COMPANY ENRICHMENT
+--------------------------------------------------------------------------------
+  - GET /companies/find?domain=…; on success the durable result is recorded
+    and the run moves to review.
+  - 404 → "Hunter couldn't find company data for this domain." The run is
+    failed with error_code not_found; the user can enter another domain. It
+    is not an application failure, and no credit is estimated.
+  - An unreadable success → malformed; credit estimate unknown (NULL).
+
+
+--------------------------------------------------------------------------------
+11. DURABLE FIELD MAPPING (details: docs/providers/hunter.md §5)
+--------------------------------------------------------------------------------
+  name (else legalName, else the domain)  → canonical name
+  domain                                  → primary domain
+  https://<domain>                        → website URL (derived)
+  phone, else site.phoneNumbers[0]        → primary phone (company line)
+  geo                                     → {countryCode, region, city,
+                                             postalCode, addressLine1}; no
+                                             country assumed; no coordinates
+  metrics.employees                       → exact count = min/max; "11-50"
+                                             → range; "N+" → min; else nothing
+  category.industry (one field)           → industry
+  description                             → description (≤ 2000)
+  tags                                    → evidence only (≤ 10)
+  id                                      → lead_sources identity only
+Ignored: emails, social handles/followers, logo, funding, traffic, revenue,
+market cap, technology, other taxonomy codes, coordinates, parents, and so on
+(unit test proves they are dropped).
+
+
+--------------------------------------------------------------------------------
+12. COMPANY SCHEMA EXTENSION
+--------------------------------------------------------------------------------
+companies.industry and companies.description: nullable, bounded,
+provider-neutral, shown in the drawer. No provider_data JSON and no
+hunter_* columns.
+
+
+--------------------------------------------------------------------------------
+13. GOOGLE TRANSIENT HANDOFF
+--------------------------------------------------------------------------------
+  - The browser sends the open search's name in startEnrichment.lookup.
+  - The server uses it for one Domain Finder call (and a Try again resends it
+    from browser state).
+  - storableName() returns null for discovery references (unit-tested), and
+    a DB CHECK rejects a stored name for them (DB-tested).
+  - The browser review read the mock's stored runs, results and evidence as
+    the user: no Google names, addresses or categories.
+  - Historical references: no name exists; the user types one or a domain.
+    Nothing is "recovered".
+
+
+--------------------------------------------------------------------------------
+14. ENRICHMENT RUNS / RESULTS
+--------------------------------------------------------------------------------
+States:
+  draft → resolving_domain → domain_review   (name lookups)
+  draft / domain_review / failed → enriching → review | failed
+  review → processing → completed            (create/merge, in ingest_lead)
+  review → completed                         (skip)
+  any open state → cancelled                 (closing the sheet)
+Each transition is a filtered update ("only from …"), so double clicks can't
+race. One result per run, insert-only, recorded only while enriching.
+Matching outcome, decision, notes and committed company are kept on the run.
+
+
+--------------------------------------------------------------------------------
+15. DEDUPLICATION
+--------------------------------------------------------------------------------
+The lead-core hierarchy (dedupe.matchCompany), applied in order:
+  1 provider identity: Hunter id OR the reference's Place ID already linked
+    to an active company (lead_sources)
+  2 domain
+  3 international phone (review)
+  4 name + same place (review)
+  5 new
+Results: provider identity/domain → Existing company (Merge/Skip; Create
+disabled with the reason); weak → Possible duplicate (no suggestion);
+started from an existing company → that company. Workspace-local (DB- and
+browser-tested). No silent merge of weak matches.
+
+
+--------------------------------------------------------------------------------
+16. MERGE BEHAVIOUR
+--------------------------------------------------------------------------------
+The P1-E2 planner is reused, extended only with industry/description:
+  - blank changes nothing; equal values need no change
+  - empty fields are filled
+  - conflicting populated values keep the Vleeds value and are reported
+    (sheet + run.commit_notes)
+  - the name is never changed; location/employees only fill missing values
+  - qualification is untouched (enrichment never sets it)
+  - a domain owned by another active company is never moved (note)
+The review preview is derived from the same planner, so it cannot disagree
+with the write (unit-tested).
+
+
+--------------------------------------------------------------------------------
+17. COMMIT THROUGH INGEST_LEAD
+--------------------------------------------------------------------------------
+planRowCommit (the CSV row planner) → public.ingest_lead(…,
+p_enrichment_run_id, p_notes), as one transaction:
+  - lock run, require processing, write company + evidence
+  - link the Place ID; update the reference
+  - complete the run
+Idempotent: a second call returns the recorded result (DB-tested). Manual
+and CSV calls are unchanged (DB test + P1-E2 regression 81/81).
+
+
+--------------------------------------------------------------------------------
+18. HUNTER SOURCE EVIDENCE
+--------------------------------------------------------------------------------
+lead_sources with source_kind api, provider_key hunter and
+external_record_id = Hunter id, one row per non-empty value:
+  company.name, .website, .domain, .phone, .location, .employee_range,
+  .industry, .description (fitted to 2 KB), .tags
+No empty values, no payloads. A repeated identity row is kept once
+(on conflict do nothing; DB-tested). The drawer shows "Source: API
+(hunter)" (browser-verified).
+
+
+--------------------------------------------------------------------------------
+19. GOOGLE PLACE ID IDENTITY LINK
+--------------------------------------------------------------------------------
+  - After create/merge, inside ingest_lead: lead_sources (google_places,
+    Place ID, company.provider_reference, observed_value NULL) is attached
+    to the COMMITTED company.
+  - The reference becomes selected/existing_company → that company. This
+    is allowed even on a completed search; other candidates stay frozen.
+  - A concurrent second run can't re-link the reference.
+  - A later search shows "Existing company" with the right company link
+    (browser-verified).
+
+
+--------------------------------------------------------------------------------
+20. PROVIDER USAGE
+--------------------------------------------------------------------------------
+provider_usage_events rows for hunter / domain_finder | company_enrichment:
+  request_count (incl. retry), result_count, status, estimated credits,
+  credit rule text (pricing_reference), workspace, enrichment_run_id,
+  occurred_at
+No key, payload or contact data. Recorded for failures too; none when
+unconfigured.
+
+
+--------------------------------------------------------------------------------
+21. CREDIT ESTIMATES
+--------------------------------------------------------------------------------
+estimated_credit_millis (generic; 1000 = 1 credit):
+  Domain Finder                        0
+  Company Enrichment with data         200
+  Company Enrichment 404/error         0
+  Company Enrichment unreadable 200    NULL
+The rule lives in hunter/usage.ts as provider metadata. UI labels:
+  - "Enrich company · estimated 0.2 credit"
+  - "Estimated Hunter credits used: X"
+  - "Hunter this month: Domain resolution N requests · Company enrichments
+    N · Estimated credits X" + "Your Hunter account shows the actual
+    balance"
+No plan limit is coded and no "remaining" figure is shown.
+
+
+--------------------------------------------------------------------------------
+22. DISCOVER INTEGRATION
+--------------------------------------------------------------------------------
+No redesign:
+  - "Find company data" sits next to "Saved for enrichment" in the existing
+    Decision cell/card.
+  - A "Company data" panel (existing Panel/PanelHeader) sits between results
+    and history: not-configured message, or usage + "Enrich a company" +
+    "Saved for enrichment (N)" (no names).
+  - Google attribution is unchanged.
+  - After a commit, the open search shows the result as Existing company.
+
+
+--------------------------------------------------------------------------------
+23. EXISTING-COMPANY ENRICHMENT
+--------------------------------------------------------------------------------
+"Enrich company" is in the drawer header, only when configured.
+  - Domain known: prefilled; the user presses Enrich company · estimated 0.2
+    credit.
+  - No domain: the user enters a name (domain suggestions) or a domain.
+  - Review: "Enriching <company>. Only empty fields are filled." with
+    Will fill / Keeps existing per field. Merge or Skip only.
+  - "Save enrichment" is required.
+Browser-verified: industry and description filled, Hunter evidence shown.
+
+
+--------------------------------------------------------------------------------
+24. RESPONSIVE BEHAVIOUR
+--------------------------------------------------------------------------------
+Verified at 1440, 390 and 360 in the browser. 1280 and 768 use the same
+sm/md/lg breakpoints as P1-E3/P1-E2.
+  - The sheet is a right sheet on sm+ and a bottom sheet on phones.
+  - Domain choices fit, with ≥ 44px rows.
+  - The review table becomes stacked cards below sm.
+  - Create/Merge/Skip and Save stay reachable (footer ≥ 44px within the
+    viewport).
+  - Find company data and decision buttons are ≥ 44px.
+  - Bottom navigation is unchanged; no horizontal overflow on the page or
+    in the sheet.
+
+
+--------------------------------------------------------------------------------
+25. ACCESSIBILITY
+--------------------------------------------------------------------------------
+  - Domain choices, look-up mode and decisions are native radios in
+    fieldsets with legends.
+  - Disabled Create carries its reason via aria-describedby.
+  - Loading and results are announced (role=status, aria-live); provider
+    errors use role=alert.
+  - A step list with aria-current marks the stage; focus moves to each
+    stage heading.
+  - The sheet is a modal <dialog> (focus trapped, Escape, focus returns to
+    the opener).
+  - The compare table has a caption and row headers. Outcomes are text
+    labels ("Will fill", "Keeps existing", …), not colour.
+  - Button names include the company ("Find company data for …").
+Not done: an axe audit / screen-reader pass (carried).
+
+
+--------------------------------------------------------------------------------
+26. TESTS ADDED
+--------------------------------------------------------------------------------
+A. tests/unit/enrichment.test.ts: 35 tests (network always mocked)
+   Registry and configuration:
+     - default provider; unconfigured → no request; NEXT_PUBLIC_ ignored
+     - capabilities; loopback-only override, refused in production
+   Client:
+     - X-API-KEY header, key never in the URL or query
+     - status mapping (400/401/403/404/422/429/451/5xx/504)
+     - no retry for quota, rate, invalid, setup, 404 or 451
+     - bounded retry counted; timeout; malformed (unknown credit)
+     - key absent from all results and usage
+   Domain Finder:
+     - request params (company/limit ≤5); Beta mapping, normalization,
+       de-dup
+     - limit; empty/404 → no suggestions; short name → no request
+   Company Enrichment:
+     - request + full mapping; ignored fields dropped; 404 not charged
+     - fallbacks; employee parsing (9 cases); location without an assumed
+       country; one industry field; description clip
+   Credits: estimates + formatting.
+   Input / handoff:
+     - transient discovery name never storable; manual name storable
+     - direct domain normalized; input validation; messages for every code
+   Pipeline:
+     - lead-core normalization (bad phone dropped, name fallback)
+     - classification over the whole hierarchy incl. Place-ID link; allowed
+       decisions
+     - merge planning (fills/keeps/notes)
+     - evidence (provider key + id, tags, no empty values)
+     - skip; domain not moved; review preview = planner
+B. tests/db/enrichment.test.ts: 17 tests (PGlite)
+   - RLS on, no anon, no deletes, results have no update privilege
+   - runs workspace-only; members create in their own workspace only
+     (created_by)
+   - discovery-reference runs can't store a name; no content/payload columns
+   - candidate / target / matched / committed company must be same workspace
+   - input-shape, status and outcome CHECKs; completion only from
+     review/processing
+   - immutable provider/input kind/origin; final runs frozen
+   - results: same workspace/run, one per run, only while enriching, run's
+     provider, matched company in workspace
+   - industry/description/tags limits (results and companies)
+   - results workspace-only and not updatable
+   - ingest_lead enrichment:
+       · company + industry/description
+       · Hunter evidence; Google identity row (no value) only on the
+         committed company
+       · run completed with notes
+       · reference linked even though its search is completed; run counts
+         unchanged
+       · idempotent second call
+       · a concurrent second run can't re-link
+   - merge path: no link; repeated identity evidence kept once
+   - refuses non-processing and foreign runs
+   - other candidates of a finished search stay frozen
+   - manual (P1-E2) call unchanged
+   - usage: own runs only; credits validated; new statuses; workspace-only;
+     append-only
+   Mutation check: a temporary migration dropped the discovery-name CHECK,
+   the result guard, the one-result-per-run unique and the run guard, and
+   made results updatable. Result: 6/17 FAILED (every break detected). The
+   file was deleted and verified absent.
+C. Business-agnostic guard (now 4 tests):
+   - "hunter.io" only in its adapter folder / review script / bundle check
+   - X-API-KEY and provider paths only in the adapter
+   - P1-E4 fixture names banned from runtime code
+D. scripts/ui-review/review-enrichment.mjs: 70 checks (§27).
+
+
+--------------------------------------------------------------------------------
+27. TEST RESULTS (final code)
+--------------------------------------------------------------------------------
+npm.cmd run verify ........................ EXIT 0
+  lint .................................... PASS
+  typecheck ............................... PASS
+  vitest .................................. PASS 13 files, 361/361
+      DB (PGlite): tenancy 36 · icp 41 · lead core 40 · imports 20 ·
+                   discovery 18 · enrichment 17
+      unit: 189 (incl. enrichment 35, discovery 26, business-agnostic 4)
+  build (Next.js 16.4.0) .................. PASS
+  check:bundle ............................ PASS (HUNTER_API_KEY /
+                                            HUNTER_API_ENDPOINT names, key
+                                            value, api.hunter.io and provider
+                                            paths absent from client files; no
+                                            fixtures in build)
+Enrichment mutation check ................. PASS (6/17 failed when broken)
+Browser (production build + fresh mock each; MOCKED provider, fictional data):
+  P1-E4 review-enrichment.mjs configured .. PASS 62/62
+  P1-E4 review-enrichment.mjs unconfigured  PASS 8/8
+  P1-E3 review-discover.mjs configured .... PASS 57/57 (regression)
+  P1-E3 review-discover.mjs unconfigured .. PASS 8/8   (regression)
+  P1-E2 review-imports.mjs ................ PASS 81/81 (regression)
+  P1-E1 review-leads.mjs .................. PASS 40/40 (regression)
+  S2 review-settings.mjs .................. PASS 66/66 (regression)
+  S1A review.mjs .......................... PASS 50/50 (regression)
+Business-agnostic guard ................... PASS
+Provider mocks in production .............. none (fixtures in tests/ and
+                                            scripts/ui-review only)
+HUNTER_API_KEY in browser bundles ......... absent (bundle scan + browser
+                                            check)
+Real Supabase/Postgres .................... NOT RUN — STILL OPEN
+
+P1-E4 browser checks cover:
+  - not configured (panel, no actions, drawer, 360)
+  - usage starts at 0, no "remaining"
+  - select → Find company data → suggestions (radios, legend, attribution,
+    credit label, announced, focus)
+  - manual domain entry; 404 not-found message; another domain
+  - review (named fields, no personal data, Create suggested) → create →
+    result (evidence, Google link, 0.2 credit)
+  - the open search shows Existing company
+  - same-domain existing match (Create disabled + reason, Keeps existing /
+    Will fill) → merge → kept-value notes
+  - later search shows Existing company for both Place IDs (correct
+    company link)
+  - historical reference (no name recovered) → domain → create + link on a
+    finished search
+  - usage "Domain resolution: 2 requests · Company enrichments: 3 ·
+    Estimated credits: 0.6"
+  - quota, 451, no suggestions, name too short, temporary error → Try
+    again → success → skip
+  - existing company → Enrich company (prefilled domain, Merge/Skip only,
+    Save enrichment) → drawer shows industry/description + (hunter)
+  - 390/360: ≥44px controls, domain choices fit, sheet without overflow,
+    stacked review, reachable decisions/save, result, mobile error,
+    bottom nav, no overflow
+  - stored data: no Google names/addresses/categories; identity rows hold
+    the Place ID only; no raw payload/personal emails
+  - the browser never calls the provider or Supabase; the key never
+    reaches the browser
+
+
+--------------------------------------------------------------------------------
+28. LIVE HUNTER SMOKE-TEST STATUS
+--------------------------------------------------------------------------------
+LIVE HUNTER TEST: NOT RUN — HUNTER_API_KEY NOT CONFIGURED
+(HUNTER_API_KEY is absent from the server environment and .env.local.) This
+is not a failure of P1-E4. The procedure is in docs/providers/hunter.md §7:
+Domain Finder only by default; Company Enrichment only if the owner chooses.
+Also still open from P1-E3: LIVE GOOGLE PLACES TEST NOT RUN (no key).
+
+
+--------------------------------------------------------------------------------
+29. CODE-QUALITY REVIEW
+--------------------------------------------------------------------------------
+Verified
+  Q1  Provider abstraction: actions/service/DAL/UI use types.ts + registry
+      only; Hunter shapes, endpoints, header and credit rule live in hunter/
+      (guard test).
+  Q2  Google transient handoff: the name is held in browser state → one
+      server request; never stored (code rule + DB CHECK + browser read-back).
+  Q3  Durable-field selection: an explicit allow-list mapper; ignored fields
+      tested; no payloads; evidence ≤ 2 KB.
+  Q4  Workspace relationships: composite FKs on every link; RLS; no deletes;
+      DB-tested across workspaces.
+  Q5  Domain normalization: only lead-core normalizeDomain (input, Domain
+      Finder, results).
+  Q6  Dedupe / merge / ingest reuse: matchCompany, planCompanyMerge,
+      planRowCommit, ingest_lead. No second algorithm; P1-E2 behaviour is
+      unchanged (regressions).
+  Q7  Source evidence + identity links: provider-keyed and idempotent; the
+      Place ID is linked only to the committed company and only while the
+      reference waits.
+  Q8  Credit estimates: generic column; provider rule as metadata; unknown
+      ≠ 0; labelled as an estimate.
+  Q9  Provider failures: category → fixed message; bounded retry only for
+      transient errors; 451 never worked around.
+  Q10 Client/server boundary: the registry is server-only; the browser
+      receives view models only; bundle scan + browser request/key checks.
+Follow-ups
+  F1 (Low)  Two open runs for the same discovery reference can both create
+            companies (only the first links the Place ID). Consider refusing
+            a second open run per reference.
+  F2 (Low)  Usage totals read up to 5,000 monthly events and sum them in
+            memory (carried from P1-E3 F2).
+  F3 (Low)  The website URL is derived as https://<domain> (Hunter returns
+            no URL). It is documented and evidence-backed.
+  F4 (Low)  Hunter 403 is mapped to "rate limited" per its documentation;
+            other 403 causes would show the same calm message.
+  F5 (Info) There is no enrichment history view (runs are kept for audit);
+            "Saved for enrichment" lists the latest 10 references.
+  F6 (Info) The endpoint override is refused by VERCEL_ENV=production (same
+            as P1-E3); other hosts need an equivalent guard.
+  F7 (Info) Carried: no CSP; forbidden pages return HTTP 200; RLS helper
+            my_workspace_ids() still planned.
+
+
+--------------------------------------------------------------------------------
+30. CANONICAL-DESIGN DEVIATIONS
+--------------------------------------------------------------------------------
+No redesign. Reused: ConfigSheet, Panel, PanelHeader, Field, inputClass,
+Button, StatusPill, Alert, the CSV compare-sheet radio pattern, the drawer
+detail rows, navigation and shell.
+  D1 Discover gains a "Company data" panel between results and recent
+     activity.
+  D2 The enrichment sheet is the existing ConfigSheet with two optional
+     props (pending label, hide Cancel on the final step) and a small
+     numbered step list.
+  D3 The Decision column on desktop is 50px wider (230 → 280) to fit "Find
+     company data".
+  D4 The company drawer header gains "Enrich company" next to the
+     restriction control; Company Details gains Industry and Description.
+
+
+--------------------------------------------------------------------------------
+31. UNRESOLVED ISSUES
+--------------------------------------------------------------------------------
+  U1  PRE-PRODUCTION BLOCKER — REAL SUPABASE VERIFICATION STILL OPEN
+      (172 DB tests only on PGlite).
+  U2  LIVE HUNTER TEST NOT RUN (no key). LIVE GOOGLE PLACES TEST NOT RUN
+      (carried).
+  U3  Browser checks use the UI-review mock (fake Supabase + fictional
+      provider endpoints). Constraints are proven in tests/db; the adapter
+      is proven in unit tests.
+  U4  database.types.ts is still hand-maintained (+2 tables).
+  U5  F1–F6 above.
+  U6  No axe audit / screen-reader pass (carried).
+  U7  1280px and 768px were not screenshotted separately (same breakpoints
+      as 1440/390 verified).
+  U8  Carried: HTTP 200 for forbidden pages; no CSP.
+
+
+--------------------------------------------------------------------------------
+32. SCREENSHOTS (docs/reports/screenshots/P1-E4/)
+--------------------------------------------------------------------------------
+Production build + UI-review mock + MOCKED provider with fictional companies.
+  01-enrichment-not-configured-desktop.png   no HUNTER_API_KEY
+  02-discover-find-company-data-desktop.png  saved for enrichment + action
+  03-domain-suggestions-desktop.png          radios, attribution, credit label
+  04-domain-manual-entry-desktop.png         typed domain after "not found"
+  05-company-enrichment-review-desktop.png   new company review
+  06-company-enrichment-existing-match-desktop.png  same domain, Create
+                                             disabled
+  07-company-enrichment-created-desktop.png  created + evidence + Google link
+  08-company-enrichment-merged-desktop.png   merged + kept values
+  09-company-enrichment-usage-desktop.png    monthly usage, estimated credits
+  10-company-enrichment-provider-error-desktop.png  quota message
+  11-existing-company-enrich-desktop.png     drawer → Enrich company review
+  12-domain-suggestions-mobile.png           390px
+  13-company-enrichment-review-mobile.png    390px stacked review
+  14-company-enrichment-result-mobile.png    390px result
+  15-company-enrichment-error-mobile.png     390px quota message
+
+
+--------------------------------------------------------------------------------
+33. EXACT RECOMMENDED NEXT STORY
+--------------------------------------------------------------------------------
+First, still: close U1 (enable virtualization + Docker, then supabase start,
+db reset, db:types, SUPABASE_TEST_DB_URL test:db, verify). Optionally run the
+live Hunter Domain Finder smoke test (§28) and the Google smoke test once
+keys exist.
+
+Then, with explicit approval only:
+P1-E5 — Decision-Maker + Contact Discovery Foundation:
+  - use the permanent company/domain from P1-E4 to find professional
+    contacts matching the workspace ICP's configured decision-maker titles
+  - a generic contact-discovery provider contract (Hunter capabilities may be
+    evaluated there)
+  - contacts reviewed and written through the existing contact matching and
+    ingest_lead path, with suppression checks and provider evidence
+  - no outreach, no Apollo unless separately approved
+
+P1-E4 stops here. No Hunter Domain Search, Email Finder, Email/Combined
+Enrichment, Hunter Discover, Apollo, decision-maker discovery, scoring,
+calling, email sequences or campaign work has been started. The canonical UI
+remains locked.
+================================================================================

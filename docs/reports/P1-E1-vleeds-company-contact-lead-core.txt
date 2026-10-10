@@ -1,0 +1,525 @@
+================================================================================
+VLEEDS — COMPLETION REPORT
+Story:   P1-E1 — Company + Contact Lead Core
+Date:    2026-10-08
+Status:  COMPLETE (development verification on embedded Postgres/PGlite).
+
+  ******************************************************************
+  *  REAL SUPABASE PRE-PRODUCTION VERIFICATION: STILL OPEN          *
+  *  All three DB suites (117 tests: 36 tenancy + 41 ICP + 40 lead  *
+  *  core) have run ONLY on PGlite with the Supabase shim, never on *
+  *  a real Supabase/Postgres stack. Docker is still unavailable on *
+  *  this machine. Not attempted in this story. Mandatory gate      *
+  *  before production.                                             *
+  ******************************************************************
+================================================================================
+
+CONTENTS
+  1 Summary            9 Score storage            17 Tests added
+  2 Files created     10 Deduplication model      18 Test results
+  3 Files modified    11 Suppression records      19 Code-quality findings
+  4 Migration/schema  12 DAL implementation       20 Canonical-design deviations
+  5 Companies         13 Leads page               21 Unresolved issues
+  6 Contacts          14 Company detail drawer    22 Screenshots
+  7 Source evidence   15 Responsive behaviour     23 Recommended next story
+  8 Qualification     16 Accessibility
+
+
+--------------------------------------------------------------------------------
+1. SUMMARY
+--------------------------------------------------------------------------------
+Vleeds now has a lead core: the place discovered or imported data will live.
+  - companies (the primary prospect record; no separate leads table),
+    contacts, lead_sources (append-only evidence), lead_scores (storage for
+    future ICP results, keyed by profile + revision) and suppression_records
+    (do-not-contact), all workspace-owned with RLS and composite foreign keys
+  - deterministic normalization and matching helpers (domain, company name,
+    email, conservative phone; company and contact match hierarchies) ready
+    for P1-E2 ingestion
+  - Zod schemas for every lead-core input
+  - the Leads page reads real companies. An empty workspace shows a truthful
+    empty state. A company drawer (URL state ?company=<id>) shows details,
+    contacts, ICP scores (only if stored), source evidence and restrictions,
+    plus a small qualification control that saves through a server action.
+  - no discovery, providers, enrichment, scoring calculation, calling or
+    email; no sample data in real workspaces
+Quality gate: npm.cmd run verify EXIT 0 (216/216 tests); browser reviews
+S1A 50/50, S2 66/66, P1-E1 40/40 on the final build.
+
+
+--------------------------------------------------------------------------------
+2. FILES CREATED
+--------------------------------------------------------------------------------
+Database
+  supabase/migrations/20261009000000_lead_core_foundation.sql
+Lead-core library (shared, no business data)
+  src/lib/lead-core/normalize.ts   domain, company name, email, phone, person name
+  src/lib/lead-core/dedupe.ts      matchCompany / matchContact (deterministic)
+  src/lib/lead-core/schemas.ts     Zod: company, contact, location, evidence,
+                                   score, breakdown, suppression, qualification
+  src/lib/lead-core/display.ts     labels and formatting (text, not colour)
+  src/lib/lead-core/views.ts       DTOs passed to the UI
+DAL (server-only, exported via src/lib/dal/index.ts)
+  src/lib/dal/companies.ts         listCompanies, getCompanyDetail, setCompanyQualification
+  src/lib/dal/contacts.ts          contactsForCompanies
+  src/lib/dal/lead-sources.ts      evidenceFor
+  src/lib/dal/lead-scores.ts       scoresForCompanies, isCurrentScore
+  src/lib/dal/suppressions.ts      activeSuppressions
+Server action
+  src/app/w/[workspaceId]/leads/actions.ts   setCompanyQualification
+UI (src/components/leads/)
+  company-table.tsx                table (md+) / cards (<md), QualificationPill, RestrictedPill
+  company-drawer.tsx               drawer content (server-rendered)
+  company-drawer-frame.tsx         inline column (lg+) / modal sheet (<lg), focus, Escape
+  qualification-control.tsx        four-state control + reason + save
+  drawer-parts.tsx                 DrawerSection / DrawerDetail (shared with the S1A drawer)
+Tests and tooling
+  tests/db/lead-core.test.ts       40 data-boundary tests
+  tests/unit/lead-core.test.ts     48 unit tests
+  scripts/ui-review/review-leads.mjs  40 browser checks + screenshots 01-11
+Docs
+  docs/product/vleeds-lead-core.md
+  docs/reports/P1-E1-vleeds-company-contact-lead-core.txt (this file)
+  docs/reports/screenshots/P1-E1/*.png (11)
+
+
+--------------------------------------------------------------------------------
+3. FILES MODIFIED
+--------------------------------------------------------------------------------
+  src/app/w/[workspaceId]/leads/page.tsx   real data, empty state, drawer via URL
+  src/components/leads/lead-detail-drawer.tsx  uses shared drawer-parts (no visual change)
+  src/lib/dal/index.ts                     exports the lead-core DAL
+  src/lib/supabase/database.types.ts       + 5 tables (hand-maintained)
+  src/app/globals.css                      programmatic focus targets (tabindex=-1)
+                                           draw no keyboard ring
+  tests/unit/business-agnostic.test.ts     + lead-core fixture names must not reach
+                                           runtime code; + "clay.com" provider term
+  scripts/ui-review/mock-supabase.mjs      test-only lead-core fixtures, ordering,
+                                           limit, member qualification PATCH
+  docs/architecture/vleeds-data-model.md   §3b lead core; superseded plans removed
+  docs/architecture/vleeds-tenancy.md      lead-core suite described
+NOT modified: earlier migrations, auth, proxy, Supabase clients, env, seed.sql,
+Settings/ICP code.
+
+
+--------------------------------------------------------------------------------
+4. MIGRATION / SCHEMA (20261009000000_lead_core_foundation.sql)
+--------------------------------------------------------------------------------
+Five tables, each with workspace_id → workspaces ON DELETE CASCADE, RLS
+enabled, column-level grants, nothing for anon, no DELETE grant, updated_at
+triggers where rows change, and prevent_tenant_key_change triggers on every
+ownership/relationship key. Children reference parents through composite
+FKs (workspace_id, parent_id); contacts also declare
+unique (workspace_id, company_id, id), so evidence and suppression can require
+"this contact AT this company". No new functions: policies reuse
+private.is_workspace_member and private.has_workspace_role.
+Indexes (each tied to a query or FK):
+  companies   (workspace_id, archived_at) · (workspace_id, qualification_state)
+              WHERE active · (workspace_id, normalized_name) [matching] ·
+              UNIQUE (workspace_id, primary_domain) WHERE domain AND active
+  contacts    (workspace_id, company_id) · (workspace_id, normalized_email)
+              WHERE email · UNIQUE (company_id) WHERE is_primary AND active
+  lead_sources (workspace_id, company_id) · (workspace_id, contact_id) ·
+              UNIQUE (workspace_id, provider_key, external_record_id,
+              field_key, company_id, contact_id) NULLS NOT DISTINCT
+              WHERE external_record_id
+  lead_scores (workspace_id, company_id) · (icp_profile_id, icp_revision) ·
+              UNIQUE (company_id, icp_profile_id, icp_revision)
+  suppression_records (workspace_id, company_id) · (workspace_id, company_id,
+              contact_id) WHERE contact · UNIQUE active target NULLS NOT DISTINCT
+Policies
+  companies, contacts   SELECT/INSERT/UPDATE  is_workspace_member
+  lead_sources          SELECT/INSERT         is_workspace_member (append-only)
+  lead_scores           SELECT                is_workspace_member (no API writes)
+  suppression_records   SELECT/INSERT         is_workspace_member
+                        UPDATE                has_workspace_role(owner, admin)
+
+
+--------------------------------------------------------------------------------
+5. COMPANIES
+--------------------------------------------------------------------------------
+canonical_name (display, 1–200), normalized_name (matching), website_url
+(http/https), primary_domain (normalized host), primary_phone (as entered,
+3–40) + primary_phone_normalized (+digits or null), location jsonb ≤2 KB
+{countryCode, region, city, postalCode, addressLine1, addressLine2} (all
+optional, any country), employee_count_min/max (whole, ≥0, min ≤ max),
+qualification_state, qualification_reason ≤500, notes ≤5000, archived_at,
+created_by, timestamps. No provider-speculative fields.
+Deviation: the normalized columns are computed in TypeScript
+(src/lib/lead-core/normalize.ts) rather than generated in SQL. That keeps one
+implementation shared with future ingestion. The DB CHECKs their format
+(lower-case hostname, +E.164-like phone, trimmed non-empty name).
+
+
+--------------------------------------------------------------------------------
+6. CONTACTS
+--------------------------------------------------------------------------------
+company_id (same-workspace FK), first/last/full name (full required), job
+title, seniority (reuses the ICP hints: executive|director|manager|
+individual_contributor), email + normalized_email (pair CHECK, lower-case),
+phone + phone_normalized, linkedin_url (https), is_primary (one active
+primary per company; an archived contact can't be primary), status
+(active|left_company|unknown), notes, archived_at. Name + title + company are
+enough. company_id and workspace_id are immutable, so a contact can't be moved.
+Email is indexed but not unique (shared inboxes); ingestion decides.
+
+
+--------------------------------------------------------------------------------
+7. LEAD / SOURCE EVIDENCE (lead_sources)
+--------------------------------------------------------------------------------
+Subject: company_id and/or contact_id (at least one; if both, the contact must
+belong to that company). source_kind manual|csv|public_dataset|website|api|
+other (no provider names). provider_key free text ^[a-z0-9][a-z0-9_.-]{0,63}$.
+external_record_id requires provider_key. field_key
+^(company|contact)\.[a-z][a-z0-9_]*$, with documented keys (company.name,
+.website, .domain, .phone, .location, .employee_range; contact.name, .title,
+.email, .phone, .linkedin) used for labels. observed_value jsonb ≤2 KB (no
+payloads). confidence 0–100 (data confidence, not fit). observed_at,
+source_url. Append-only: insert grant only, keys immutable. External identity
+is unique per workspace + provider + record + field + subject, so the same
+record can exist in another workspace.
+
+
+--------------------------------------------------------------------------------
+8. QUALIFICATION STATE
+--------------------------------------------------------------------------------
+unreviewed (default) | needs_review | qualified | unqualified, plus an
+optional reason (≤500). It is an operational workspace decision, independent
+of any ICP and of scores. Archival stays separate (archived_at). Implemented
+as a mutation: the drawer's control calls setCompanyQualification (server
+action), which authenticates, re-authorizes the workspace, validates with Zod
+and writes only those two columns through the DAL. RLS allows any workspace
+member. The page refreshes in place.
+
+
+--------------------------------------------------------------------------------
+9. SCORE STORAGE (lead_scores)
+--------------------------------------------------------------------------------
+company_id + icp_profile_id + icp_revision (both FKs within the workspace),
+score 0–100, grade A|B|C, breakdown (object ≤4 KB; documented keys
+company_fit, geography_fit, decision_maker_fit, buying_signal_fit,
+exclusion_penalty), status pending|scored|stale, scored_at. Rules:
+  - scored needs score, grade and scored_at
+  - pending has no score or grade
+  - one row per company × profile × revision
+  - the DB never derives a grade; grades will come from the saved ICP thresholds
+Read-only for API roles; the future scoring engine writes. Display rule: a
+result is current only if scored at the profile's current revision. Older
+revisions show "Outdated: profile changed". No automatic stale propagation:
+when scoring arrives, a revision change should mark that profile's scored
+rows stale and queue re-scoring (documented). Nothing computes scores in this
+story.
+
+
+--------------------------------------------------------------------------------
+10. DEDUPLICATION MODEL
+--------------------------------------------------------------------------------
+Normalization (normalize.ts)
+  domain   scheme, www., path, query, port, credentials and trailing dot are
+           dropped; IDN → punycode; invalid hosts, IPs and numeric TLDs → null.
+           "https://www.example.com/", "http://example.com/", "example.com"
+           → example.com
+  name     NFKC, lower-case, whitespace collapse; drops . , quotes/apostrophes;
+           "&" ≡ "and"; dash variants. Legal/meaningful words (LLC, Ltd, Inc,
+           Group, Holdings) are KEPT.
+  email    trim + lower-case only (plus-tags and dots kept)
+  phone    comparison value only for international input ("+…"/"00…"),
+           extensions dropped; national numbers → null (country unknown).
+           LIMITATION: no phone library; the display value is always kept.
+Matching (dedupe.ts), within one workspace only
+  company  1 provider identity → match · 2 domain → match · 3 international
+           phone → review · 4 normalized name + same country and city/region
+           → review · else new. Similar names never auto-merge.
+  contact  1 email → match · 2 provider identity → match · 3 same name at the
+           same company → review · else new. Phone is NEVER used.
+Database backstops: one active company per domain per workspace (archived
+rows don't block); provider-record uniqueness on evidence.
+
+
+--------------------------------------------------------------------------------
+11. SUPPRESSION RECORDS
+--------------------------------------------------------------------------------
+company_id (required), contact_id (contact scope only), scope company|contact,
+reason ≤500, active. company scope ⇒ no contact; contact scope ⇒ a contact
+that belongs to that company in that workspace. One active record per target.
+Members add; owners/admins lift or edit; target and scope are immutable.
+Shown as "Restricted" on rows and "Company restricted" / "Contact restricted"
+/ "Do not contact this company" in the drawer. NOT enforced anywhere yet,
+because no contact actions exist. Every future call, email or campaign action
+must check active records (documented in the product and data-model docs).
+
+
+--------------------------------------------------------------------------------
+12. DAL IMPLEMENTATION
+--------------------------------------------------------------------------------
+src/lib/dal/ split by domain. Everything is server-only, uses the user-scoped
+client (RLS) and narrows results to DTOs (src/lib/lead-core/views.ts).
+  listCompanies(ws)          ≤100 active companies, newest activity first, with
+                             primary contact, contact count, evidence count,
+                             company restriction, current default-profile grade
+  getCompanyDetail(ws, id)   null for unknown/archived/foreign/malformed ids
+                             (indistinguishable); last 25 evidence + total
+  setCompanyQualification    two columns, typed failure, zero rows → forbidden
+  helpers                    contactsForCompanies, evidenceFor (company + contact
+                             evidence, de-duplicated), scoresForCompanies
+                             (+ profile names/revisions), activeSuppressions
+Stored jsonb (location) is re-parsed with Zod; invalid → treated as absent.
+Every query filters by workspace_id in addition to RLS.
+
+
+--------------------------------------------------------------------------------
+13. LEADS PAGE
+--------------------------------------------------------------------------------
+- Empty workspace: "All companies (0)" and the canonical empty state: "No
+  companies yet. Companies and their contacts will appear here once they are
+  added to this workspace. Adding companies by hand and importing them from a
+  spreadsheet are the next steps being built."
+- With companies: the table columns are Grade (only if any current score
+  exists), Company (name, restriction, location · domain), Primary contact,
+  Qualification, Sources, Updated. There is no fit ring, signal chip, Call
+  button or fake pagination. The footer says "Showing N companies" (or the
+  100-limit note).
+- While the drawer is open, Sources and Updated hide below 1536px so the core
+  columns stay readable.
+
+
+--------------------------------------------------------------------------------
+14. COMPANY DETAIL DRAWER
+--------------------------------------------------------------------------------
+Opened by a row link (?company=<id>, shareable). Header: company, location ·
+domain, qualification pill, grade (only if a current score exists),
+restriction pill and a "Do not contact this company" note with the reason.
+Sections:
+  - Company Details (address, website, phone, employees, notes; "No company
+    details recorded yet" when empty)
+  - Qualification (control)
+  - Contacts (n): primary first, title, email, phone, profile link, status,
+    contact restriction
+  - ICP Scores: "Not scored yet…" or each stored result with profile,
+    revision, score/grade, Pending or Outdated
+  - Sources: field, contact, value, kind (+provider key), confidence, date,
+    source link; "Showing the 25 most recent of N"
+No call, email or automation actions are shown.
+
+
+--------------------------------------------------------------------------------
+15. RESPONSIVE BEHAVIOUR
+--------------------------------------------------------------------------------
+lg+ (≥1024): table panel + 400px sticky drawer column (card). <lg: the drawer
+is a full-height modal sheet from the right (max 440px; full width on phones).
+<md: stacked cards (whole card is the link, ≥44px). Verified at 1440, 390 and
+360px: no page or sheet overflow, sheet anchored full height, bottom
+navigation unchanged.
+
+
+--------------------------------------------------------------------------------
+16. ACCESSIBILITY
+--------------------------------------------------------------------------------
+- The table has a caption; rows use real links (keyboard Enter opens a company);
+  the selected row link has aria-current.
+- Drawer: aria-labelledby the company title; focus moves to the title on open
+  and back to the company link on close; Escape closes on desktop and mobile.
+  The mobile sheet is a modal <dialog> (focus trap, inert page).
+- Qualification, restriction, contact status, score status and grades are
+  text ("Qualified", "Company restricted", "Left company", "Pending",
+  "Outdated: profile changed", grade letter with aria-label).
+- Contacts, scores and sources are semantic lists; icons are aria-hidden with
+  sr-only labels (Email:, Phone:); external links announce "opens in a new tab".
+- Qualification uses a fieldset with labelled radios (44px) and a labelled
+  reason field; save status is announced (aria-live).
+- Programmatic focus targets draw no keyboard ring (globals.css).
+Not done: automated axe audit / screen-reader pass (carried).
+
+
+--------------------------------------------------------------------------------
+17. TESTS ADDED
+--------------------------------------------------------------------------------
+A. tests/db/lead-core.test.ts — 40 tests (PGlite, API-role method)
+   hardening (3): RLS + no anon on all 5 tables; anon reads denied; no hard
+     deletes for any table.
+   companies (10): owner/admin/member read; foreign by id/workspace denied;
+     outsider none; multi-org exact union; member create (created_by, default
+     state); create in unrelated workspace denied (member, outsider); created_by
+     spoof denied; member updates qualification, foreign zero rows; update in
+     A1 doesn't touch the same-domain company in B1; workspace_id immutable
+     (grant + trigger); domain unique per workspace among active only (other
+     workspace OK, archived frees it, archived still readable); format/range/
+     state/name/location/phone CHECKs.
+   contacts (6): read own, foreign invisible; must belong to a same-workspace
+     company (FK even for a member of both); can't be moved (grant + trigger);
+     one active primary, archived can't be primary; email matching is
+     workspace-local; status/seniority/name/profile-URL CHECKs.
+   evidence (6): company, contact and both; needs a subject; workspace +
+     contact-company consistency, foreign invisible; kind/field key/provider
+     key/confidence/size/external-id CHECKs; external identity unique per
+     workspace (allowed in another); append-only.
+   scores (6): read own / foreign none; API writes denied; company and profile
+     must be in the score's workspace; pending allowed, scored needs values;
+     score 0–100, grade A/B/C, pending empty, breakdown shape/size, revision ≥1,
+     one per revision; profile id + revision retained after the profile
+     changes (revision immutable).
+   suppression (5): members add company/contact restrictions; scope shape and
+     contact-company-workspace FK; one active per target and re-add after
+     lifting; only owner/admin lift (member zero rows); foreign invisible,
+     target immutable.
+   Mutation check: a temporary migration opened company/contact reads, let
+   members lift restrictions, dropped the domain index, the company key
+   trigger and the contact→company FK, and allowed score inserts. Result:
+   8/40 tests FAILED (each break detected). The file was then deleted.
+B. tests/unit/lead-core.test.ts — 48 tests: domain equivalence (9 forms) and
+   rejection (10 cases), IDN; company-name normalization incl. kept legal
+   words; email; international vs national phone; company matching (provider,
+   per-provider ids, domain from URLs, phone → review, name+location → review,
+   similar names not merged, other workspace = new); contact matching (email,
+   provider, name+company review, shared phone never merges); company,
+   location, qualification, contact, evidence, score, breakdown and
+   suppression schemas; display helpers.
+C. business-agnostic guard: lead-core review fixture names may not appear in
+   src/ or migrations; provider list + "clay.com".
+D. scripts/ui-review/review-leads.mjs — 40 browser checks (§18).
+
+
+--------------------------------------------------------------------------------
+18. TEST RESULTS (final code)
+--------------------------------------------------------------------------------
+npm.cmd run verify ........................ EXIT 0
+  lint .................................... PASS
+  typecheck ............................... PASS
+  vitest .................................. PASS 7 files, 216/216
+      DB (PGlite): tenancy 36 · icp_profiles 41 · lead core 40
+      unit: 99 (incl. business-agnostic 3, lead core 48)
+  build (Next.js 16.4.0) .................. PASS
+  check:bundle ............................ PASS 23 client files, 0 secrets;
+                                            0 fixture artifacts in 359 build files
+Lead-core RLS mutation check .............. PASS (8/40 failed when broken)
+Browser, final build, fresh mock each:
+  P1-E1 review-leads.mjs .................. PASS 40/40
+  S2 review-settings.mjs (regression) ..... PASS 66/66
+  S1A review.mjs (regression) ............. PASS 50/50
+Business-agnostic guard ................... PASS
+Fixture data in production build .......... none (fixtures live only in
+                                            scripts/ui-review; bundle + guard)
+Real Supabase/Postgres .................... NOT RUN — STILL OPEN
+
+Browser checks include:
+  - truthful empty state; 5 companies with none from another org
+  - real-data columns only; grade only when current; restriction text; no
+    Call buttons
+  - URL-state drawer with title focus; facts, scores (current + outdated),
+    contacts (primary, left company, contact restricted), evidence
+  - qualification save updates the table in place
+  - Escape closes and returns focus; company restriction note
+  - foreign/malformed company ids open nothing; navigation unchanged
+  - member access
+  - 390/360: empty state, cards ≥44px, full-height modal sheet with focus
+    inside, Escape, no overflow
+  - zero browser requests to Supabase; no other organization's data in any
+    browser-visible response
+
+
+--------------------------------------------------------------------------------
+19. CODE-QUALITY FINDINGS
+--------------------------------------------------------------------------------
+Verified
+  Q1  Workspace ownership: every row has an immutable workspace_id; all child
+      links are composite FKs, so even a member of two workspaces cannot
+      cross-link them (tested).
+  Q2  Relationship integrity: contacts can't change company; evidence and
+      contact restrictions require the contact to belong to the named
+      company; scores require company and profile in the same workspace.
+  Q3  Input validation: Zod on the mutation (qualification) and for all future
+      inputs; DB CHECKs on formats, sizes, enums and ranges.
+  Q4  User-supplied ids: workspaceId and companyId are UUID-checked,
+      re-authorized (findWorkspace) and filtered by workspace_id + RLS. Foreign,
+      unknown and malformed company ids behave identically (no drawer).
+  Q5  Errors: DB failures are mapped to fixed messages; reads throw
+      DataAccessError to the generic error boundary.
+  Q6  Client/server boundary: no browser DB client; Client Components receive
+      DTOs only; actions accept no redirect targets; bundle scan clean.
+  Q7  Least privilege: scores are not API-writable; evidence is append-only;
+      lifting restrictions is owner/admin; nothing is deletable.
+Findings / follow-ups
+  F1 (Low)  Normalized columns are app-computed. A direct API writer (an
+            authenticated workspace member) could store a normalized_name that
+            doesn't match canonical_name. Formats are DB-checked; P1-E2 writes
+            only through the DAL helpers. Consider a DB-side recompute if
+            direct API writes are ever allowed.
+  F2 (Low)  Members can archive companies and edit any company/contact field
+            (collaborative model, as specified). Revisit if role-based
+            ownership is needed.
+  F3 (Low)  RLS uses is_workspace_member per row; add my_workspace_ids()
+            (data-model §2) before lists grow large.
+  F4 (Info) Lead list is capped at 100 with no pagination yet (stated in the UI).
+  F5 (Info) Carried: no CSP; forbidden pages return HTTP 200.
+
+
+--------------------------------------------------------------------------------
+20. CANONICAL-DESIGN DEVIATIONS
+--------------------------------------------------------------------------------
+No redesign. Tokens, typography, panels, pills, grade badge and drawer
+sections are reused (Section/Detail extracted to drawer-parts.tsx; the S1A
+drawer is unchanged visually).
+  G1 Lead-core columns instead of the discovery-era ones (no Fit, Signal,
+     Next Action, checkbox, row menu or pagination) because that data doesn't
+     exist. The Grade column appears only when a real current score exists.
+     The S1A LeadTable/LeadDetailDrawer stay for the fixture route and later.
+  G2 Desktop drawer is a sticky rounded card column (400px) beside the table,
+     not an edge-to-edge column. The shared AppShell padding can't be bled
+     from one page without changing the shell.
+  G3 With the drawer open, Sources/Updated hide below 1536px.
+  G4 The drawer has no Actions or Disposition sections (no calling/email
+     yet); it adds Qualification, ICP Scores and Sources sections.
+  G5 New pills: qualification (neutral/amber/green/soft red, with text) and a
+     neutral "Restricted" pill with a ban icon.
+
+
+--------------------------------------------------------------------------------
+21. UNRESOLVED ISSUES
+--------------------------------------------------------------------------------
+  U1  PRE-PRODUCTION BLOCKER — REAL SUPABASE VERIFICATION STILL OPEN (117 DB
+      tests run only on PGlite).
+  U2  Browser checks use the UI-review mock (it mimics RLS for these paths but
+      enforces no constraints; constraints are proven in tests/db).
+  U3  database.types.ts still hand-maintained (5 tables added).
+  U4  No way to add companies/contacts/evidence/restrictions in the UI yet
+      (P1-E2), no restriction lifting UI, no pagination/filters/search.
+  U5  Score calculation and automatic stale-marking not implemented (by design).
+  U6  Phone normalization is conservative (international format only).
+  U7  seed.sql has no lead-core rows (the mock carries the review fixtures).
+  U8  No axe audit / screen-reader pass (carried).
+  U9  Carried: HTTP 200 for forbidden workspace pages; no CSP.
+
+
+--------------------------------------------------------------------------------
+22. SCREENSHOTS (docs/reports/screenshots/P1-E1/)
+--------------------------------------------------------------------------------
+Production build + UI-review mock + fictional generic fixtures (example.test).
+  01-leads-empty-desktop.png             Alpha: truthful empty state
+  02-leads-populated-fixture-desktop.png Beta: 5 companies
+  03-company-detail-desktop.png          drawer: details, qualification
+  04-company-contacts-desktop.png        primary, left company, contact restricted
+  05-source-evidence-desktop.png         ICP scores (current + outdated), sources
+  06-qualified-company-desktop.png       after saving "Qualified"
+  07-suppressed-company-desktop.png      company restriction
+  08-leads-empty-mobile.png              390px
+  09-leads-populated-mobile.png          cards
+  10-company-detail-mobile.png           full-height sheet
+  11-source-evidence-mobile.png          sources in the sheet
+
+
+--------------------------------------------------------------------------------
+23. RECOMMENDED NEXT STORY
+--------------------------------------------------------------------------------
+First, still: close U1 (enable virtualization + Docker, then supabase start,
+db reset, db:types, SUPABASE_TEST_DB_URL test:db, verify).
+
+Then, with explicit approval only:
+P1-E2 — Manual + CSV Lead Ingestion and Deduplication: add company/contact
+manually; CSV upload with column mapping; normalization via
+src/lib/lead-core/normalize.ts; duplicate preview via dedupe.ts; merge / skip
+/ create decisions; csv/manual evidence rows; import report; Leads pagination
+and basic filters; restriction add/lift UI.
+
+P1-E1 stops here. No import, discovery, provider, enrichment, calling,
+campaign or scoring work has been started. The canonical UI remains locked.
+================================================================================

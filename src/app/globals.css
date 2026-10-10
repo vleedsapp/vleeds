@@ -1,0 +1,115 @@
+@import "tailwindcss";
+
+/*
+ * Vleeds design tokens — derived from docs/design/canonical/.
+ * Warm off-white canvas, white panels, charcoal/slate type, one deep-green
+ * accent, subtle supporting status tints. No gradients or decorative color.
+ * Documented in docs/design/vleeds-design-tokens.md.
+ */
+@theme {
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* Surfaces */
+  --color-canvas: #f8f7f4; /* application background + sidebar */
+  --color-surface: #ffffff; /* cards, panels, top bar, drawer */
+  --color-surface-muted: #fbfaf8; /* subtle inset areas, table hover */
+  --color-sunken: #f1efea; /* skeletons, neutral icon circles, avatar */
+
+  /* Lines */
+  --color-line: #ebe8e2;
+  --color-line-strong: #dcd8d0;
+
+  /* Text */
+  --color-ink: #16191c; /* strong: titles, primary values */
+  --color-ink-muted: #545b62; /* secondary: subtitles, body */
+  --color-ink-subtle: #6f757c; /* muted: labels, metadata (AA on white) */
+
+  /* Primary (deep green) */
+  --color-brand: #1d5c45;
+  --color-brand-hover: #174b38;
+  --color-brand-strong: #154532; /* text/icons on brand tint */
+  --color-brand-tint: #e8f1ec;
+  --color-brand-tint-strong: #d5e8dd;
+
+  /* Supporting status tints */
+  --color-warning: #a86211;
+  --color-warning-tint: #fdf2e2;
+  --color-attention: #cc6430; /* "Not configured" dot */
+  --color-attention-tint: #fcefe7;
+  --color-danger: #b23a31;
+  --color-danger-tint: #fcebe9;
+  --color-info: #2d5fc4;
+  --color-info-tint: #eaf0fc;
+  --color-violet: #7448b8;
+  --color-violet-tint: #f2ecfb;
+
+  /* Radii */
+  --radius-sm: 6px; /* chips, kbd */
+  --radius-md: 8px; /* buttons, inputs */
+  --radius-lg: 10px; /* nav items, menu items */
+  --radius-xl: 14px; /* cards, panels */
+  --radius-2xl: 18px; /* drawers, sheets */
+
+  /* Shadows (soft, low-contrast) */
+  --shadow-card: 0 1px 2px rgb(22 25 28 / 0.04), 0 2px 6px -2px rgb(22 25 28 / 0.04);
+  --shadow-bar: 0 1px 0 rgb(22 25 28 / 0.04), 0 4px 12px -8px rgb(22 25 28 / 0.08);
+  --shadow-pop: 0 2px 4px rgb(22 25 28 / 0.05), 0 12px 32px -8px rgb(22 25 28 / 0.18);
+  --shadow-drawer: -8px 0 24px -12px rgb(22 25 28 / 0.12);
+}
+
+html {
+  color-scheme: light;
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  background: var(--color-canvas);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  font-feature-settings: "cv11", "ss01";
+  -webkit-font-smoothing: antialiased;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-brand);
+  outline-offset: 2px;
+}
+
+/* Programmatic focus targets (e.g. a drawer title) are not keyboard controls: no ring. */
+[tabindex="-1"]:focus-visible {
+  outline: none;
+}
+
+::selection {
+  background: var(--color-brand-tint-strong);
+}
+
+@keyframes vleeds-pulse {
+  50% {
+    opacity: 0.55;
+  }
+}
+
+.skeleton {
+  background: var(--color-sunken);
+  border-radius: var(--radius-sm);
+  animation: vleeds-pulse 1.6s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton {
+    animation: none;
+  }
+  * {
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Mobile safe-area helpers */
+.pb-safe {
+  padding-bottom: env(safe-area-inset-bottom);
+}
+.pt-safe {
+  padding-top: env(safe-area-inset-top);
+}

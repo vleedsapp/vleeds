@@ -1,0 +1,701 @@
+================================================================================
+VLEEDS — COMPLETION REPORT
+Story:   P1-E6 — Deterministic ICP Evaluation + Lead Scoring
+Date:    2026-10-09
+Status:  COMPLETE (development verification on embedded Postgres/PGlite).
+
+  ******************************************************************
+  *  REAL SUPABASE PRE-PRODUCTION VERIFICATION: STILL OPEN          *
+  *  All eight DB suites (199 tests: 36 tenancy + 41 ICP + 40 lead  *
+  *  core + 20 imports + 18 discovery + 17 enrichment + 14 contact  *
+  *  discovery + 13 scoring) have run ONLY on PGlite with the       *
+  *  Supabase shim, never on a real Supabase/Postgres stack. Docker *
+  *  is still unavailable. Mandatory gate before production.        *
+  ******************************************************************
+
+  P1-E6 PROVIDER CALLS:
+  NONE — SCORING IS LOCAL AND DETERMINISTIC
+  (Browser review: scoring changed no provider usage totals; the only
+  usage event during the review came from the deliberate Enrich company
+  step used to change company data.)
+
+  Live Google/Hunter smoke tests are still not run (no keys); they don't
+  affect scoring.
+================================================================================
+
+CONTENTS
+  1 Summary                       12 Buying-signal scoring       23 Responsive behaviour
+  2 Files created                 13 Exclusion handling          24 Accessibility
+  3 Files modified                14 Score/grade calculation     25 Tests added
+  4 Migration/schema              15 Data coverage               26 Test results
+  5 Scoring engine architecture   16 Explanation model           27 Code-quality review
+  6 Configured-category handling  17 Input fingerprint           28 Canonical-design deviations
+  7 Effective weights             18 Stale/current detection     29 Unresolved issues
+  8 Company fit                   19 Lead-score persistence      30 Screenshots
+  9 Geography fit                 20 Multiple ICP behaviour      31 Exact recommended next story
+ 10 Decision-maker fit            21 Company drawer integration
+ 11 Signal observations           22 Leads integration
+
+
+--------------------------------------------------------------------------------
+1. SUMMARY
+--------------------------------------------------------------------------------
+Companies can now be evaluated against an ICP: "how well does this company
+match, and why?"
+  - Evaluate fit (company drawer) → review the profile's buying/exclusion
+    signals (Present / Not present / Unknown, optional note) → the server
+    evaluates the company's durable data with a pure TypeScript engine.
+  - The result shows:
+      · fit score 0–100 and A/B/C grade (or Excluded with reasons)
+      · data coverage (separate from fit)
+      · a category breakdown with configured and effective weights
+      · penalties
+      · "Why this score?" and "Improve data coverage"
+      · the profile + revision, and Current/Outdated
+  - A result is current only for the profile's current revision AND the
+    current SHA-256 fingerprint of its scoring inputs. Company, contact,
+    signal or ICP changes make it Outdated until it is recalculated.
+  - Leads shows the default ICP's current grade with its fit ("A 84 fit"),
+    or Excluded / Outdated / —. The Grade filter adds Excluded, Outdated
+    and Not scored.
+No AI, no provider calls, no qualification or suppression changes, no batch
+or background scoring.
+Quality gate: npm.cmd run verify EXIT 0 (440/440 tests). Browser reviews:
+  - P1-E6 50/50
+  - regressions: P1-E5 72 + 6, P1-E4 62 + 8, P1-E3 57 + 8, P1-E2 81,
+    P1-E1 40, S2 66, S1A 50 (all PASS)
+
+
+--------------------------------------------------------------------------------
+2. FILES CREATED
+--------------------------------------------------------------------------------
+Database
+  supabase/migrations/20261014000000_icp_lead_scoring.sql
+Scoring engine (src/lib/scoring/; pure, no I/O)
+  types.ts             input DTO, evaluation, explanation types
+  text.ts              literal whole-phrase matching (shared with P1-E5)
+  input.ts             public.scoring_input document → typed DTO
+  company-fit.ts       corpus, industry, size, characteristics, keywords
+  geography-fit.ts     country/region/city matching
+  decision-maker-fit.ts  role priority from saved contacts
+  signals.ts           buying signals, exclusions/penalties
+  evaluate.ts          evaluateCompanyAgainstIcp, gradeFor, coverage,
+                       missing data
+  explain.ts           bounded persisted record (breakdown, explanation,
+                       weights, reasons)
+  view.ts              strict browser input schemas + result view model
+DAL / actions / UI
+  src/lib/dal/scoring.ts       scoring input, save, latest result,
+                               observations, profiles
+  src/app/w/[workspaceId]/leads/scoring-actions.ts
+      loadFitEvaluation, saveSignalObservations, evaluateCompanyFit
+  src/components/scoring/fit-sheet.tsx  the evaluation sheet (2 stages)
+  src/components/scoring/fit-panel.tsx  drawer summary + Evaluate/
+                                        Recalculate + other results
+Tests and tooling
+  tests/unit/scoring.test.ts            24 unit tests (fictional fixtures)
+  tests/db/scoring.test.ts              13 data tests (PGlite)
+  scripts/ui-review/review-scoring.mjs  50 browser checks, screenshots
+                                        01–16
+Docs
+  docs/product/vleeds-lead-scoring.md
+  docs/reports/P1-E6-vleeds-icp-lead-scoring.txt (this file)
+  docs/reports/screenshots/P1-E6/*.png (16)
+
+
+--------------------------------------------------------------------------------
+3. FILES MODIFIED
+--------------------------------------------------------------------------------
+  src/lib/dal/lead-scores.ts          fingerprint/coverage; scoreCurrentness
+                                      (revision + fingerprint)
+  src/lib/dal/companies.ts            list items carry score_state/coverage;
+                                      drawer score views with currentness +
+                                      default-ICP fit summary
+  src/lib/dal/index.ts                exports
+  src/lib/lead-core/views.ts          CompanyListItem.scoreState/
+                                      coveragePercent; ScoreView reasons;
+                                      FitSummary
+  src/lib/lead-core/list-query.ts     grade filter: excluded, outdated
+  src/lib/lead-core/schemas.ts        score status "excluded"
+  src/lib/contact-discovery/model.ts  role matching reuses scoring/text.ts
+                                      (same rules)
+  src/lib/supabase/database.types.ts  + observations table, lead_scores
+                                      columns, 2 functions, list_companies
+                                      columns
+  src/components/leads/company-drawer.tsx  ICP Scores section → FitPanel
+  src/components/leads/company-table.tsx   Grade cell: grade + fit /
+                                           Excluded / Outdated / —; mobile
+                                           states
+  src/components/leads/lead-filters.tsx    grade options
+  src/components/settings/config-sheet.tsx optional cancelLabel (default
+                                           unchanged)
+  src/app/w/[workspaceId]/leads/page.tsx   settingsPath for the drawer
+  scripts/ui-review/mock-supabase.mjs      scoring_input / save_lead_score /
+                                           list_companies currentness /
+                                           observations; fictional Beta
+                                           scoring config + 2 extra
+                                           profiles; Northwind industry/
+                                           description
+  tests/db/lead-core.test.ts, tests/db/imports.test.ts
+      Fixture updates required by the new constraints: a "scored" row now
+      needs a fingerprint and coverage. The list test's current grade uses
+      the real computed fingerprint.
+  docs/architecture/vleeds-data-model.md (§3g), docs/product/
+  vleeds-icp-configuration.md, docs/product/vleeds-lead-core.md
+NOT modified: earlier migrations, qualification, suppression, Today,
+providers, Settings editors, navigation, tokens.
+
+
+--------------------------------------------------------------------------------
+4. MIGRATION / SCHEMA (20261014000000_icp_lead_scoring.sql)
+--------------------------------------------------------------------------------
+company_signal_observations
+  - company, profile, revision, kind (buying|exclusion), signal_id,
+    state (present|absent), note ≤ 500, optional source evidence,
+    created_by, observed_at
+  - composite FKs (company/profile in the workspace)
+  - unique (company, profile, revision, kind, signal)
+  - trigger: the signal exists in that kind's list at the profile's
+    current revision; evidence belongs to the company
+  - RLS members incl. DELETE (unknown); immutable keys
+  - index (company_id, icp_profile_id, icp_revision)
+lead_scores
+  - + input_fingerprint (^[0-9a-f]{64}$), coverage_percent 0–100,
+    explanation (≤ 16 KB), effective_weights (≤ 1 KB),
+    exclusion_reasons (≤ 50)
+  - status adds excluded
+  - scored ⇒ score/grade/time/fingerprint/coverage
+  - excluded ⇒ no score/grade + time/fingerprint/coverage/≥ 1 reason
+  - pre-engine scored rows → stale
+public.scoring_input(workspace, company, profile)
+  - canonical input document + sha256 fingerprint
+public.save_lead_score(...)
+  - the only write path: membership, current revision, current
+    fingerprint, outcome and threshold-consistent grade checks; upsert per
+    revision
+public.list_companies
+  - recreated: + score_state, coverage_percent; grade/score only when
+    current; new grade filters/sort
+Indexes: only the observations lookup index; lead_scores keeps its
+existing indexes (the list reads the default profile's row via the unique
+(company, profile, revision) index).
+
+
+--------------------------------------------------------------------------------
+5. SCORING ENGINE ARCHITECTURE
+--------------------------------------------------------------------------------
+  DB:     public.scoring_input → canonical document + fingerprint
+            (one definition)
+  DAL:    parseScoringInput → ScoringInput DTO (zod; invalid ICP sections
+            = not configured)
+  Engine: evaluateCompanyAgainstIcp(input) → Evaluation (pure; same input →
+            same output)
+  Record: toScoreRecord → bounded columns → public.save_lead_score
+The same evaluator can serve batch evaluation and the Today queue later.
+React components never calculate.
+
+
+--------------------------------------------------------------------------------
+6. CONFIGURED-CATEGORY HANDLING
+--------------------------------------------------------------------------------
+  company_fit         any of industries / size / characteristics / keywords
+                      (notes never scored)
+  geography_fit       ≥ 1 target geography
+  decision_maker_fit  ≥ 1 role
+  buying_signal_fit   ≥ 1 enabled buying signal
+No scoring model, or no configured category with weight > 0 → "This ICP
+does not have enough criteria configured to evaluate companies." (with a
+Settings link); nothing is stored.
+
+
+--------------------------------------------------------------------------------
+7. EFFECTIVE WEIGHTS
+--------------------------------------------------------------------------------
+Denominator = sum of the configured categories' saved weights; contribution
+= raw × weight / denominator. Saved weights are never rewritten. Each
+category shows its configured weight and its effective share (e.g. 40 →
+"effective 50%" when buying signals aren't configured). Unit-tested:
+  - every non-empty category combination's shares sum to 100
+  - (87.5×40 + 100×20 + 70×20)/80 = 86
+
+
+--------------------------------------------------------------------------------
+8. COMPANY FIT
+--------------------------------------------------------------------------------
+The average of the configured groups.
+  - Industry: an ICP phrase in the company industry or tag evidence → 100;
+    otherwise 0; no data → 0 + unknown ("Industry data unavailable" vs
+    "doesn't match").
+  - Size: inside → 100, overlap → 50, outside → 0; open-ended bounds; no
+    data → unknown.
+  - Characteristics/keywords: share of phrases found in the corpus (name,
+    industry, description, tag evidence); no text beyond the name →
+    unknown.
+Literal whole-word matching only; no synonyms.
+
+
+--------------------------------------------------------------------------------
+9. GEOGRAPHY FIT
+--------------------------------------------------------------------------------
+Country / country + region / country + city (+ region when set), normalized
+comparison.
+  - any match → 100
+  - located elsewhere → 0 (known)
+  - no country, or too general for the targets → 0 (unknown)
+No geocoding, distance or provider calls.
+
+
+--------------------------------------------------------------------------------
+10. DECISION-MAKER FIT
+--------------------------------------------------------------------------------
+Saved active contacts only ("left company" excluded in scoring_input). P1-E5
+whole-word title matching (now a shared helper).
+  - best priority: primary 100 · secondary 70 · fallback 40 · none 0
+    (known)
+  - no contacts → 0 (unknown)
+Provider decision-maker flags, seniority and the number of contacts add no
+points.
+
+
+--------------------------------------------------------------------------------
+11. SIGNAL OBSERVATIONS
+--------------------------------------------------------------------------------
+Manually confirmed per company × profile × revision. Unknown = no row
+(delete). Validated twice:
+  - the server action re-reads the ICP: revision match, enabled signal of
+    that kind
+  - the DB trigger checks that the signal exists in the profile at its
+    current revision
+Not copied to new revisions. The note is optional and doesn't affect
+scoring (or the fingerprint). Nothing is inferred from text, websites or
+providers. "Save signals only" records observations without re-scoring
+(the result then reads Outdated).
+
+
+--------------------------------------------------------------------------------
+12. BUYING-SIGNAL SCORING
+--------------------------------------------------------------------------------
+sum(present weights) / sum(enabled weights) × 100. Absent 0; unknown 0 and
+lower coverage; disabled ignored. Signal weights are separate from the
+category weight.
+
+
+--------------------------------------------------------------------------------
+13. EXCLUSION HANDLING
+--------------------------------------------------------------------------------
+Only enabled exclusions observed PRESENT count.
+  - hard_exclude → outcome Excluded: no grade, score NULL, reasons stored
+    and shown; breakdown kept for explanation
+  - penalty → points subtracted (summed, not weighted)
+Unknown/absent never exclude. Suppression is untouched.
+
+
+--------------------------------------------------------------------------------
+14. SCORE / GRADE CALCULATION
+--------------------------------------------------------------------------------
+  final = Math.round(clamp(base − penalties, 0, 100))
+  A ≥ a, B ≥ b, else C, using the profile's saved thresholds
+save_lead_score rejects a grade inconsistent with the thresholds.
+Documented example: 85/100/70/50 with weights 40/20/20/20 → base 78; −10 →
+68 → B (unit-tested).
+
+
+--------------------------------------------------------------------------------
+15. DATA COVERAGE
+--------------------------------------------------------------------------------
+Units:
+  industry, size, each characteristic, each keyword, geography, decision
+  makers, each enabled buying signal, each enabled exclusion
+coverage = round(known / total × 100). It never changes the fit (tested:
+same score with coverage 62% vs 100%). "Improve data coverage" names what is
+missing and points to Enrich company / Find decision makers / Review
+signals; nothing runs automatically.
+
+
+--------------------------------------------------------------------------------
+16. EXPLANATION MODEL
+--------------------------------------------------------------------------------
+explanation = {
+  v, base_score,
+  categories: {key: [{criterion, result
+               (matched|partial|not_matched|unknown), detail}]},
+  exclusions: [...],
+  missing: [...]
+}
+  - ≤ 20 items per list; details ≤ 200 chars; total ≤ 16 KB
+  - deterministic template sentences; no HTML, no AI
+breakdown holds RAW category percentages + exclusion_penalty (points).
+effective_weights = {category: {configured, effective}}.
+
+
+--------------------------------------------------------------------------------
+17. INPUT FINGERPRINT
+--------------------------------------------------------------------------------
+SHA-256 (PostgreSQL sha256) of the canonical jsonb text of scoring_input:
+  - company name/industry/description/employee range/country/region/city
+  - sorted distinct tag evidence
+  - sorted active-contact titles
+  - sorted observations (current revision)
+  - ICP id, revision and configuration
+jsonb output sorts keys, so the same facts give the same hash.
+DB-tested:
+  - stable for notes, qualification, contact names/emails and contact
+    insertion order
+  - changes for industry, description, employee range, location, a contact
+    added, a contact title change, a contact leaving, tags, a signal
+    observation, and an ICP revision
+  - a note edit leaves it unchanged
+
+
+--------------------------------------------------------------------------------
+18. STALE / CURRENT DETECTION
+--------------------------------------------------------------------------------
+current ⇔ stored revision = current revision AND stored fingerprint =
+scoring_input() fingerprint now.
+  - Computed on read: drawer (scoreCurrentness) and Leads (list_companies),
+    with the same function. No mutation triggers.
+  - The drawer explains why: "The profile changed …" vs "Company, contact
+    or signal data changed …".
+Browser-verified Outdated after:
+  - a company change (Enrich company)
+  - a contact change (a new decision-maker contact)
+  - a signal change (Save signals only)
+  - an ICP revision change
+In each case Recalculate made the result current again.
+
+
+--------------------------------------------------------------------------------
+19. LEAD-SCORE PERSISTENCE
+--------------------------------------------------------------------------------
+Only through save_lead_score.
+  - The action accepts ids and observation choices only (strict schemas;
+    unit-tested that score/grade/breakdown/coverage/fingerprint keys are
+    rejected).
+  - The server reads the inputs, evaluates and saves.
+  - The function rejects stale revisions/fingerprints and threshold-
+    inconsistent grades.
+  - Same revision → update in place (no duplicates); new revision → new
+    row; old rows readable (DB-tested).
+  - Direct table writes are still denied.
+
+
+--------------------------------------------------------------------------------
+20. MULTIPLE ICP BEHAVIOUR
+--------------------------------------------------------------------------------
+One result per company × profile × revision. Leads and the drawer summary
+use the workspace's default profile; the sheet can evaluate any active
+profile, and the drawer lists other profiles' results. Without a default:
+"No default ideal customer profile." — the sheet falls back to the first
+active profile, or explains that a profile is needed in Settings.
+Browser-verified: alternate profile (geography only → A at its own
+thresholds); a profile without criteria → not-evaluable message.
+
+
+--------------------------------------------------------------------------------
+21. COMPANY DRAWER INTEGRATION
+--------------------------------------------------------------------------------
+"ICP Scores" section:
+  - summary button: grade badge + "Grade A · 84 fit", profile · Revision N
+    · Coverage N%, "Signals 4 confirmed · 0 unknown", Current / Outdated /
+    Excluded pill (text) + reason
+  - "Evaluate fit" / "Recalculate fit"
+  - other results ("Outdated: profile changed" / "Outdated: data changed")
+The sheet:
+  1 ICP and signal review: profile choice, revision, weights, thresholds,
+    signals with effects, Save signals only, Evaluate fit
+  2 Evaluation result: score/grade/coverage/current, breakdown table, Why
+    this score?, Improve data coverage, Review signals / Recalculate fit
+
+
+--------------------------------------------------------------------------------
+22. LEADS INTEGRATION
+--------------------------------------------------------------------------------
+Grade column (unchanged header) shows:
+  - current: grade badge + "84 fit"
+  - "Excluded" / "Outdated" / "—" (Not scored)
+Mobile cards show the badge + "84 fit" or Excluded / Outdated score pills.
+Grade filter: Any, A, B, C, Excluded, Outdated, Not scored (server-side, URL
+state). Sort by grade: current A→C, then Excluded, Outdated, Not scored. No
+old grade is ever shown as current (DB- and browser-tested). Coverage stays
+in the drawer/sheet to keep Leads dense.
+
+
+--------------------------------------------------------------------------------
+23. RESPONSIVE BEHAVIOUR
+--------------------------------------------------------------------------------
+Verified at 1440, 390 and 360 in the browser. 1280/768 share these
+breakpoints: the sheet is a right sheet on sm+ and a bottom sheet on phones;
+the Leads table is md+ and cards below.
+  - Signal radios are wrapping pills ≥ 44px on phones.
+  - The breakdown table fits on phones; explanation lists wrap.
+  - No page or sheet overflow; bottom navigation unchanged.
+
+
+--------------------------------------------------------------------------------
+24. ACCESSIBILITY
+--------------------------------------------------------------------------------
+  - Signal choices are labelled radios in fieldsets with a legend (the
+    signal name).
+  - Score, grade, Excluded, Current/Outdated and coverage are text; the
+    grade badge has an aria-label.
+  - The breakdown table has a caption and row headers.
+  - "Why this score?" lists are semantic, with sr-only result words
+    (Matched / Partly matched / Not matched / Unknown) beside the visual
+    marks.
+  - Loading and evaluation are announced (role=status); errors use
+    role=alert.
+  - The modal dialog manages focus; the stage heading is focused.
+  - Phone controls are ≥ 44px.
+Not done: an axe audit / screen-reader pass (carried).
+
+
+--------------------------------------------------------------------------------
+25. TESTS ADDED
+--------------------------------------------------------------------------------
+A. tests/unit/scoring.test.ts: 24 tests
+   - text normalization/whole-phrase matching; corpus
+   - industry exact/phrase/tag/no match/unavailable
+   - size full/partial/outside/open-ended/unknown
+   - characteristics/keywords literal, no synonyms, unknown
+   - company-fit averaging; notes ignored
+   - geography country/region/city/missing/too general
+   - decision makers primary/secondary/fallback/highest/none/no contacts
+   - buying weights; present/absent/unknown; disabled ignored
+   - hard exclusion (single, multiple, reasons); unknown/absent never
+     exclude
+   - penalties (single, summed, floor 0)
+   - unconfigured categories + effective weights; the documented example
+   - grades from saved thresholds; rounding; not evaluable (no model / no
+     criteria / zero weights)
+   - all 15 category combinations
+   - coverage (and independence from fit); missing-data guidance
+   - persisted record/breakdown/explanation/bounds; result view points;
+     determinism
+   - input parsing (invalid section = unconfigured; bad fingerprint
+     rejected)
+   - strict browser schemas reject score/grade/breakdown/coverage/
+     fingerprint
+B. tests/db/scoring.test.ts: 13 tests
+   - observations:
+       · RLS/anon/delete; members record; created_by; unknown = delete
+       · present/absent only; one per signal context
+       · signal must exist with that kind at the current revision
+       · company/profile same workspace; note bound; workspace-only; keys
+         immutable
+   - scoring_input:
+       · hash shape; null for foreign companies
+       · stable for irrelevant changes and contact order
+       · changes for every relevant change (incl. ICP revision); a note
+         doesn't change it
+   - save_lead_score:
+       · saves; same revision updates (no duplicates)
+       · refuses stale fingerprint/revision, inconsistent grade, bounds,
+         pending, excluded without reasons / with a score, non-members
+       · direct inserts denied; anon can't execute
+       · a new revision keeps the old row
+       · table-level fingerprint/outcome CHECKs
+   - list_companies: current → grade + fit; outdated after data change (no
+     old grade shown); excluded; outdated after ICP change; A / none /
+     outdated / excluded filters
+   Mutation check: a temporary migration dropped the observation guard
+   trigger, the one-per-signal unique and both outcome CHECKs. Result: 5/13
+   FAILED. The file was deleted and verified absent.
+C. Regression: lead-core and imports fixtures updated to the new "scored"
+   requirements (see §3). All earlier suites pass.
+D. scripts/ui-review/review-scoring.mjs: 50 checks (§26).
+
+
+--------------------------------------------------------------------------------
+26. TEST RESULTS (final code)
+--------------------------------------------------------------------------------
+npm.cmd run verify ........................ EXIT 0
+  lint .................................... PASS
+  typecheck ............................... PASS
+  vitest .................................. PASS 17 files, 440/440
+      DB (PGlite): tenancy 36 · icp 41 · lead core 40 · imports 20 ·
+                   discovery 18 · enrichment 17 · contact discovery 14 ·
+                   scoring 13
+      unit: 241 (incl. scoring 24, business-agnostic 4)
+  build (Next.js 16.4.0) .................. PASS
+  check:bundle ............................ PASS (no keys/endpoints; no
+                                            fixtures)
+Scoring mutation check .................... PASS (5/13 failed when broken)
+Browser (production build + fresh mock each; mocked providers; fictional
+data):
+  P1-E6 review-scoring.mjs ................ PASS 50/50
+  P1-E5 review-contacts.mjs ............... PASS 72/72 + 6/6
+  P1-E4 review-enrichment.mjs ............. PASS 62/62 + 8/8
+      (one run aborted with a browser navigation error "frame was
+      detached"; it passed 62/62 when rerun alone — a harness flake, noted
+      in U5)
+  P1-E3 review-discover.mjs ............... PASS 57/57 + 8/8
+  P1-E2 review-imports.mjs ................ PASS 81/81
+  P1-E1 review-leads.mjs .................. PASS 40/40
+  S2 review-settings.mjs .................. PASS 66/66
+  S1A review.mjs .......................... PASS 50/50
+Business-agnostic guard ................... PASS
+Provider calls during scoring ............. NONE (usage totals unchanged by
+                                            scoring)
+Real Supabase/Postgres .................... NOT RUN — STILL OPEN
+
+P1-E6 browser checks cover:
+  - no ICP (drawer message + sheet explanation)
+  - current fixture score in drawer and Leads
+  - signal review: profile, revision, weights, thresholds; signals with
+    effects; labelled radios
+  - A grade 80/100: industry, size, characteristic, primary
+    decision-maker, buying signals; coverage 100% (explained); why-list;
+    announced
+  - breakdown table; penalty → B (−20); hard exclusion → Excluded (+
+    drawer/Leads)
+  - signal change → Outdated (drawer + Leads); C grade with missing-data
+    explanation and coverage guidance; low coverage
+  - new decision-maker contact → Outdated → Recalculate → secondary
+    decision-maker, current
+  - Enrich company → Outdated; alternate ICP (geography only → A); ICP
+    without criteria
+  - other profiles listed; ICP revision change → Outdated (profile) →
+    recalculated (revision 4)
+  - grade filters (C, Outdated, Not scored, options); Leads sorted by grade
+  - 390/360: signal controls ≥ 44px and fit, result, Excluded, Outdated,
+    no overflow, bottom nav
+  - no provider calls from scoring; stored rows carry fingerprint/
+    coverage/explanation (excluded: reasons, no grade)
+  - qualification unchanged; the browser never calls providers or Supabase
+
+
+--------------------------------------------------------------------------------
+27. CODE-QUALITY REVIEW
+--------------------------------------------------------------------------------
+Verified
+  Q1  Deterministic scoring: a pure engine, no clock/I/O; a determinism
+      test.
+  Q2  Configured categories / effective weights: excluded from the
+      denominator; saved weights untouched; all combinations tested.
+  Q3  Coverage semantics: separate units; never alters fit (tested).
+  Q4  Text matching: one literal whole-phrase helper (scoring + P1-E5
+      roles).
+  Q5  Geography: structured, specificity-aware, unknown vs no-match
+      distinguished.
+  Q6  Role matching reuse: same helper and priority order as contact
+      discovery.
+  Q7  Signal observations: structured, revision-pinned, validated by the
+      DB and the action; unknown = no row.
+  Q8  Hard exclusions / penalties: present-only; Excluded has no grade;
+      penalties in points.
+  Q9  Thresholds: saved values only; DB re-checks grade consistency.
+  Q10 Fingerprint: one canonical definition in the DB, used for both
+      evaluation and the list; equality/inequality DB-tested.
+  Q11 Stale detection: computed on read; no fragile triggers.
+  Q12 Persistence: a single checked write path; ids-only browser input.
+  Q13 Multiple ICPs: per profile/revision; default profile for Leads.
+  Q14 Separation: qualification and suppression never changed
+      (browser-checked for qualification).
+  Q15 Client/server: the engine runs in server actions; the client renders
+      view models only.
+Follow-ups
+  F1 (Med)  A member with direct API access can call save_lead_score with
+            fabricated values that match the current fingerprint (the
+            function blocks stale/inconsistent rows, not deliberate
+            tampering by an authorized member). Moving the engine into a
+            trusted server path (service role) or into SQL would close
+            this; acceptable under the collaborative model for now.
+  F2 (Med)  list_companies computes scoring_input() for every company that
+            has a current-revision result on each Leads request. Fine at
+            MVP scale; for large workspaces consider caching the current
+            fingerprint or a materialized "inputs changed at" marker.
+  F3 (Low)  Observation history: changing an observation overwrites it
+            (the prior state is only implied by older score rows); a
+            history table may be wanted later.
+  F4 (Low)  Industry matching is one-directional (an ICP phrase must appear
+            in the company's industry/tags), so a company industry "Data"
+            doesn't match the ICP's "Data analytics". This is deliberate:
+            fewer false positives.
+  F5 (Info) No batch "Evaluate visible leads" (single-company only; same
+            engine ready for batch).
+  F6 (Info) Carried: no CSP; forbidden pages return HTTP 200;
+            my_workspace_ids() RLS helper planned.
+
+
+--------------------------------------------------------------------------------
+28. CANONICAL-DESIGN DEVIATIONS
+--------------------------------------------------------------------------------
+No redesign. Reused: ConfigSheet, Field, inputClass, Button, StatusPill,
+Alert, LeadGradeBadge, drawer sections, table/card patterns.
+  D1 Drawer "ICP Scores" now shows a clickable fit summary + Evaluate/
+     Recalculate fit (replacing the placeholder text).
+  D2 The Leads Grade cell shows "84 fit" next to the grade (no new column,
+     no fit ring); Excluded / Outdated as text.
+  D3 ConfigSheet gains an optional cancelLabel ("Close" on the result
+     view).
+  D4 The Grade filter has three more options.
+
+
+--------------------------------------------------------------------------------
+29. UNRESOLVED ISSUES
+--------------------------------------------------------------------------------
+  U1  PRE-PRODUCTION BLOCKER — REAL SUPABASE VERIFICATION STILL OPEN
+      (199 DB tests on PGlite only).
+  U2  Live provider smoke tests still not run (no keys). Not needed for
+      scoring.
+  U3  Browser checks use the UI-review mock (JS stand-ins for
+      scoring_input / save_lead_score / list_companies). The real SQL is
+      proven in tests/db; the engine is unit-tested. In the review, the ICP
+      revision change was made through the same API write Settings uses,
+      not by driving the Settings editor.
+  U4  database.types.ts is still hand-maintained.
+  U5  One intermittent puppeteer navigation error in the P1-E4 review
+      (passed on rerun).
+  U6  F1–F5 above.
+  U7  No axe audit / screen-reader pass (carried).
+  U8  1280/768 were not screenshotted separately.
+
+
+--------------------------------------------------------------------------------
+30. SCREENSHOTS (docs/reports/screenshots/P1-E6/)
+--------------------------------------------------------------------------------
+Production build + UI-review mock, fictional data.
+  01-evaluate-fit-desktop.png        drawer: current score + Recalculate fit
+  02-signal-review-desktop.png       profile/revision/weights/thresholds,
+                                     signals
+  03-score-a-desktop.png             80 / 100 fit, Grade A, coverage 100%,
+                                     why
+  04-score-b-desktop.png             penalty → Grade B
+  05-score-c-desktop.png             weak fit → Grade C
+  06-score-breakdown-desktop.png     category table: fit, weight, points
+  07-score-coverage-desktop.png      Improve data coverage
+  08-score-excluded-desktop.png      Excluded + reason
+  09-score-penalty-desktop.png       breakdown with −20 penalty
+  10-score-outdated-desktop.png      drawer: Outdated after a contact change
+  11-score-recalculated-desktop.png  recalculated, current again
+  12-leads-scored-desktop.png        Leads sorted by grade: C 27 fit,
+                                     Outdated, —
+  13-evaluate-fit-mobile.png         390 signal review
+  14-score-result-mobile.png         390 result
+  15-score-excluded-mobile.png       390 Excluded
+  16-score-outdated-mobile.png       390 drawer Outdated
+
+
+--------------------------------------------------------------------------------
+31. EXACT RECOMMENDED NEXT STORY
+--------------------------------------------------------------------------------
+First, still: close U1 (enable virtualization + Docker, then supabase start,
+db reset, db:types, SUPABASE_TEST_DB_URL test:db, verify).
+
+Then, with explicit approval only:
+P1-E7 — Today Queue + Contact Workflow:
+  - turn current A/B-grade companies with saved professional contacts into
+    a daily queue (ready to contact, callbacks due, follow-ups due, next
+    action)
+  - contact attempts with dispositions, follow-up date/time, an activity
+    timeline, suppression enforced on every action
+  - the canonical Today dashboard on real data
+  - consider the batch-evaluation entry point (same engine) and F1/F2
+    hardening
+No calling provider, email sending, SMS or campaign execution without
+separate approval.
+
+P1-E6 stops here. No calling, email, SMS, campaigns, automated follow-up,
+AI scoring, background prospecting or new provider integrations have been
+started. The canonical UI remains locked.
+================================================================================

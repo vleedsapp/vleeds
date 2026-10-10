@@ -1,0 +1,701 @@
+================================================================================
+VLEEDS — COMPLETION REPORT
+Story:   P1-E3 — Discovery Provider Foundation + Google Places Interactive Discovery
+Date:    2026-10-09
+Status:  COMPLETE (development verification on embedded Postgres/PGlite,
+         mocked provider).
+
+  ******************************************************************
+  *  REAL SUPABASE PRE-PRODUCTION VERIFICATION: STILL OPEN          *
+  *  All five DB suites (155 tests: 36 tenancy + 41 ICP + 40 lead   *
+  *  core + 20 imports + 18 discovery) have run ONLY on PGlite with *
+  *  the Supabase shim, never on a real Supabase/Postgres stack.    *
+  *  Docker is still unavailable. Not attempted in this story.      *
+  *  Mandatory gate before production.                              *
+  ******************************************************************
+
+  GOOGLE PLACES CONTENT RETENTION:
+  Place IDs retained as provider identifiers.
+  Other Places content handled according to the implemented provider-retention
+  rules and current Google Maps Platform requirements: display name, formatted
+  address, primary type and attributions are TRANSIENT (server memory during
+  the request + the browser's state for the open search). They are never
+  written to a database column, log or report. Continuation tokens are
+  never stored. No raw provider payloads are stored.
+
+  LIVE GOOGLE PLACES TEST: NOT RUN — API KEY NOT CONFIGURED
+================================================================================
+
+CONTENTS
+  1 Summary                 11 Discovery runs              21 Responsive behaviour
+  2 Files created           12 Discovery candidates        22 Accessibility
+  3 Files modified          13 Provider-data retention     23 Tests added
+  4 Migration/schema        14 Candidate decisions         24 Test results
+  5 Provider abstraction    15 Existing-company matching   25 Live smoke test status
+  6 Google Places adapter   16 Provider usage accounting   26 Code-quality review
+  7 Search request model    17 Discover UI                 27 Canonical-design deviations
+  8 Field mask              18 Google Maps attribution     28 Unresolved issues
+  9 ICP integration         19 Pagination / load more      29 Screenshots
+ 10 Geography handling      20 Provider errors             30 Recommended next story
+
+
+--------------------------------------------------------------------------------
+1. SUMMARY
+--------------------------------------------------------------------------------
+Discover is now active:
+  - ICP → Discovery run → Provider → Candidate references → Review.
+  - A member picks an ICP (the default is preselected), confirms or edits
+    what they are looking for, picks one of the ICP's geographies (or
+    another location, or none) and a page size, then presses Find
+    companies.
+  - Vleeds calls Google Places API (New) Text Search on the server and
+    shows the results with Google Maps attribution.
+  - Each result's Vleeds status (New reference / Seen before / Existing
+    company) comes from durable data only.
+  - The user can Select, Dismiss or Undo, Load more one page at a time,
+    then finish or cancel. Usage (requests/candidates for this search and
+    this month) is shown.
+  - Recent discovery activity lists past searches, with Retry for failed
+    ones.
+  - A generic, server-only provider layer (interface, capabilities, per-field
+    retention, registry) keeps Google-specific code in one folder.
+  - Place IDs are the only Google data stored. Selected references become
+    needs_enrichment (or "selected" when already an existing company). No
+    company is created from Google content.
+  - Not done (by design): Place Details, enrichment, Apollo, scoring,
+    background/bulk discovery, calling, email, campaigns.
+Quality gate: npm.cmd run verify EXIT 0 (308/308 tests). Browser reviews:
+P1-E3 not-configured 8/8 and configured 56/56, with regressions P1-E2
+81/81, P1-E1 40/40, S2 66/66 and S1A 50/50.
+
+
+--------------------------------------------------------------------------------
+2. FILES CREATED
+--------------------------------------------------------------------------------
+Database
+  supabase/migrations/20261011000000_company_discovery_foundation.sql
+Provider layer (src/lib/providers/company-discovery/)
+  types.ts                 generic contract, capabilities, retention, statuses
+  query.ts                 query + geography composition, page-size clamp
+  registry.ts              server-only registry; env handling
+  google-places/fields.ts  field mask (single source), SKU hint, retention
+  google-places/client.ts  HTTP client: headers, timeout, bounded retry,
+                           status mapping
+  google-places/mapper.ts  Google response → generic candidates
+  google-places/adapter.ts CompanyDiscoveryProvider implementation
+Discovery domain
+  src/lib/discovery/model.ts    input schemas, match state, decisions,
+                                transient view, messages
+  src/lib/discovery/service.ts  one provider page: usage → references →
+                                transient view
+DAL
+  src/lib/dal/discovery.ts       runs, candidate references, ICP options,
+                                 provider links
+  src/lib/dal/provider-usage.ts  usage events + totals
+Server actions
+  src/app/w/[workspaceId]/discover/actions.ts  start, load more, retry,
+                                               decide, complete/cancel
+UI (src/components/discover/)
+  discover-workspace.tsx   form, open search, usage, recent activity
+  discover-results.tsx     table (md+) / cards
+  provider-attribution.tsx Google Maps (and third-party) attribution
+Tests, fixtures, tooling
+  tests/unit/discovery.test.ts           26 unit tests
+  tests/db/discovery.test.ts             18 data-boundary tests (PGlite)
+  tests/fixtures/google-places.ts        fictional Text Search responses
+  scripts/ui-review/review-discover.mjs  64 browser checks (2 phases),
+                                         screenshots 00–12
+Docs
+  docs/product/vleeds-discovery.md
+  docs/providers/google-places.md
+  docs/reports/P1-E3-vleeds-company-discovery-google-places.txt (this file)
+  docs/reports/screenshots/P1-E3/*.png (13)
+
+
+--------------------------------------------------------------------------------
+3. FILES MODIFIED
+--------------------------------------------------------------------------------
+  src/app/w/[workspaceId]/discover/page.tsx  placeholder → real Discover
+  src/lib/dal/index.ts                       exports discovery + usage DAL
+  src/lib/supabase/database.types.ts         + 3 tables (hand-maintained)
+  scripts/check-client-bundle.mjs            + GOOGLE_PLACES_API_KEY /
+                                             GOOGLE_PLACES_ENDPOINT names,
+                                             places.googleapis.com and the
+                                             field-mask header must not
+                                             appear in client files
+  scripts/ui-review/mock-supabase.mjs        discovery tables, fake Text
+                                             Search endpoint, Beta ICP
+                                             categories/geographies, one
+                                             provider link
+  tests/unit/business-agnostic.test.ts       provider names allowed only in
+                                             their adapter folder; + Georgia /
+                                             United States / transportation /
+                                             automotive / staffing /
+                                             healthcare and the P1-E3 fixture
+                                             names banned from runtime
+  .env.example                               documents GOOGLE_PLACES_API_KEY
+                                             (+ dev-only endpoint override)
+  docs/architecture/vleeds-data-model.md     §3d discovery, entity map,
+                                             delivery order
+NOT modified: earlier migrations, Settings (no provider controls; Enrichment
+providers stays inactive), roles, auth, shell/navigation, design tokens.
+
+
+--------------------------------------------------------------------------------
+4. MIGRATION / SCHEMA (20261011000000_company_discovery_foundation.sql)
+--------------------------------------------------------------------------------
+Tables: discovery_runs, discovery_candidates, provider_usage_events. All are
+workspace-owned (cascade), RLS on, column-level grants, nothing for anon, no
+DELETE.
+Relationships (composite, same workspace):
+  run → icp_profiles (workspace_id, id)
+  candidate → run (workspace_id, run_id, provider_key)
+  candidate → companies
+  usage → run
+Triggers:
+  - guard_discovery_run: completed/cancelled are final
+  - guard_discovery_candidate: candidates of final runs frozen; stamps
+    decided_by/at
+  - refresh_discovery_counts: SECURITY DEFINER, search_path=''; recomputes
+    counts, which have no API grant
+  - updated_at; immutable keys (query, geography, provider, ICP reference,
+    page size, provider id)
+Indexes:
+  discovery_runs        (workspace_id, created_at desc) · (icp_profile_id)
+                        WHERE NOT NULL
+  discovery_candidates  UNIQUE (discovery_run_id, provider_key,
+                        external_record_id) · (discovery_run_id, position)
+                        · (workspace_id, provider_key, external_record_id)
+                        ["seen before"]
+  provider_usage_events (workspace_id, occurred_at desc) ·
+                        (discovery_run_id) WHERE NOT NULL
+Not added: a (workspace_id, status) run index. History reads the latest 10
+by created_at. A provider_key + occurred_at index isn't needed while usage is
+read per workspace.
+
+
+--------------------------------------------------------------------------------
+5. PROVIDER ABSTRACTION
+--------------------------------------------------------------------------------
+CompanyDiscoveryProvider exposes:
+  - providerKey, label, attribution {text, rankingNote}
+  - isConfigured()
+  - getCapabilities()
+  - searchCompanies(input)
+  - normalizeCandidate(raw)
+Capabilities: companyDiscovery, durableExternalId, durableCompanyFields,
+supportsPagination, supportsTextQuery, supportsGeographyText, maxPageSize,
+and fieldRetention (per field: durable | transient).
+Candidates carry providerKey, externalId, display {name, address, category},
+sourceUrl, attributions and fieldRetention.
+Results are generic: {ok, candidates, nextCursor, usage} or {ok:false,
+code, usage|null}. Status categories are ok, empty, timeout, rate_limited,
+setup, invalid_request, unavailable, malformed (+ not_configured).
+Registry (server-only): DEFAULT_DISCOVERY_PROVIDER = google_places;
+getDiscoveryProvider(key). Pages, actions, DAL and UI never see Google
+request/response shapes. A business-agnostic test enforces that provider
+names appear only in their adapter folder.
+
+
+--------------------------------------------------------------------------------
+6. GOOGLE PLACES ADAPTER
+--------------------------------------------------------------------------------
+Places API (New) Text Search only:
+  POST https://places.googleapis.com/v1/places:searchText
+  Headers: Content-Type: application/json, X-Goog-Api-Key,
+  X-Goog-FieldMask
+No legacy API, no Place Details, no wildcard mask.
+  - Timeout: 10 s via AbortController.
+  - Retry: one bounded retry, only for network errors, timeouts and 5xx;
+    quota, permission and invalid errors are never retried. Both requests
+    are counted.
+  - The key goes only in a header, is read only from GOOGLE_PLACES_API_KEY
+    (server-only), and is never logged or returned.
+  - GOOGLE_PLACES_ENDPOINT (dev/review only) is accepted only for loopback
+    hosts and ignored when VERCEL_ENV=production (unit-tested).
+
+
+--------------------------------------------------------------------------------
+7. SEARCH REQUEST MODEL
+--------------------------------------------------------------------------------
+Generic input: {query, geography (structured), pageSize, cursor?,
+languageCode?, regionCode?}.
+The Google body is {textQuery: "<query> in <city, region, country>",
+pageSize 1–20, pageToken?, regionCode = geography country}.
+Server-side validation (Zod, strict):
+  - query: 2–120 characters, whitespace collapsed
+  - geography: {kind: icp, id} | {kind: custom, countryCode (ISO), region?,
+    city?} | {kind: none}
+  - pageSize: 5 | 10 | 20
+  - cursor: printable, ≤ 4 KB
+The ICP profile and its geography are re-read on the server by id; the
+browser never supplies geography text for ICP geographies.
+
+
+--------------------------------------------------------------------------------
+8. FIELD MASK
+--------------------------------------------------------------------------------
+googlePlacesDiscoveryFieldMask (google-places/fields.ts, the only place):
+  places.id,places.displayName,places.formattedAddress,places.primaryType,
+  places.attributions,nextPageToken
+Per Google docs (checked 2026-10-08):
+  - id, attributions, nextPageToken → Text Search Essentials (IDs Only)
+  - displayName, formattedAddress, primaryType → Text Search Pro
+  - so each request is expected to be billed as Text Search Pro. This is
+    recorded as sku_hint.
+No prices are coded (pricing_reference = Google's pricing page). Not
+requested: phone, website, ratings, reviews, photos, hours, prices,
+summaries. A unit test pins the mask.
+
+
+--------------------------------------------------------------------------------
+9. ICP INTEGRATION
+--------------------------------------------------------------------------------
+  - The default profile is preselected; any active profile can be chosen.
+  - Its industries/categories and keywords appear as suggestions; the query
+    is prefilled with the first one and stays editable.
+  - Its target geographies are the first "Where" options.
+  - Nothing runs until Find companies is pressed. There is no AI query
+    generation and no scoring.
+  - The run records icp_profile_id + icp_revision.
+  - A workspace without a profile can still search with a typed location.
+
+
+--------------------------------------------------------------------------------
+10. GEOGRAPHY HANDLING
+--------------------------------------------------------------------------------
+Geography reuses the ICP target-geography structure (countryCode,
+countryName, region, city, label) and stays structured through to the adapter
+(DiscoveryGeography). The Google adapter composes text from the parts that
+exist and sends the country as regionCode. There is no geocoding dependency.
+The searched geography is stored on the run as Vleeds data (≤ 2 KB).
+
+
+--------------------------------------------------------------------------------
+11. DISCOVERY RUNS
+--------------------------------------------------------------------------------
+Statuses:
+  running → review (page loaded)
+  running → failed (first page failed; error_code = category)
+  review → running (Load more)
+  failed → running (Retry)
+  review → completed (Done reviewing)
+  running/review/failed → cancelled
+Completed and cancelled are final. Each transition is a filtered update
+("only from …"), so double clicks can't race. The run also stores
+pages_loaded, has_more (a flag, not the token) and counts.
+
+
+--------------------------------------------------------------------------------
+12. DISCOVERY CANDIDATES
+--------------------------------------------------------------------------------
+Each candidate holds:
+  - external_record_id (Place ID) + provider_key
+  - position (Vleeds order within the run)
+  - match_state, match_company_id
+  - decision, decided_by/at
+There are NO provider content columns (a DB test asserts this). One row per
+provider id per run; the same Place ID may appear in other runs (tested).
+Repeats across pages are ignored (insert … on conflict do nothing).
+
+
+--------------------------------------------------------------------------------
+13. PROVIDER-DATA RETENTION MODEL
+--------------------------------------------------------------------------------
+  Durable:
+    - Place ID
+    - run metadata (query, geography, ICP reference, page size, status,
+      counts, timestamps)
+    - decisions
+    - usage events
+  Transient:
+    - name, address, primary type, third-party attributions (server memory
+      + the browser's state for the open search)
+    - nextPageToken (browser ↔ server round trip only)
+  Never stored or shown:
+    - raw responses
+    - Google error bodies (reduced to a status category)
+After a reload, history shows queries and counts only (browser-verified).
+The capability model makes this explicit per provider, so a future
+durable-data provider can declare durable fields without schema changes.
+
+
+--------------------------------------------------------------------------------
+14. CANDIDATE DECISIONS
+--------------------------------------------------------------------------------
+  - Select on a new or seen-before reference → needs_enrichment
+  - Select on an existing company → selected (the DB requires a linked
+    company)
+  - Dismiss → dismissed
+  - Undo → unreviewed
+Decisions are validated server-side (Zod enum); only open runs accept them.
+The DB enforces the state list, the frozen state of final runs and the
+decided_by stamp. No company is created from transient fields.
+
+
+--------------------------------------------------------------------------------
+15. EXISTING-COMPANY IDENTITY MATCHING
+--------------------------------------------------------------------------------
+Before showing a candidate:
+  - Vleeds looks up lead_sources for provider_key = google_places AND
+    external_record_id = Place ID, restricted to active companies of the
+    workspace → "Existing company", with a link to the company drawer.
+  - Other runs' candidates → "Seen before".
+  - Otherwise → "New reference".
+Names and addresses are never used for matching, so there is no hidden
+dedupe database. Browser-verified with a mock link, which also shows that
+another workspace doesn't see it. Those lead_sources links will be written
+by the later, approved enrichment/ingestion step (P1-E4); none are created
+in P1-E3.
+
+
+--------------------------------------------------------------------------------
+16. PROVIDER USAGE ACCOUNTING
+--------------------------------------------------------------------------------
+One provider_usage_events row per request batch. Columns: provider_key,
+operation (text_search), requested_fields (mask), request_count (1, or 2
+with the retry), result_count, status, sku_hint, pricing_reference,
+estimated_cost_micros (NULL), occurred_at, created_by. Append-only. Never a
+key, token or payload. No event is recorded when the provider isn't
+configured, because no request is made.
+UI: "This search: Google Places · N requests · M candidates", plus "This
+month: N requests". There are no money amounts: there is no reliable local
+price.
+
+
+--------------------------------------------------------------------------------
+17. DISCOVER UI
+--------------------------------------------------------------------------------
+Three states:
+  (1) Find companies form, or the calm not-configured panel
+  (2) Results: table on md+, cards on phones; columns Company, Location,
+      Category, Vleeds status, Decision; usage box; attribution + About
+      these results; Load more / Cancel search / Done reviewing
+  (3) Recent discovery activity, with monthly usage and Retry for failed
+      runs
+No AI wording, fake grades or call/email actions.
+
+
+--------------------------------------------------------------------------------
+18. GOOGLE MAPS ATTRIBUTION
+--------------------------------------------------------------------------------
+The results panel footer, in the same container as the results, shows the
+text "Google Maps":
+  - translate="no", nowrap, sans-serif 400, #5E5E5E, 13px
+  - an accessible label
+  - shown only with Google-derived content
+Third-party attributions returned in places.attributions are listed next to
+it (linked when a link is given). "About these results" explains
+relevance/distance/prominence ranking and that Vleeds doesn't change it.
+Browser checks cover the text, colour and nowrap, and confirm it stays
+visible on phones and is absent from the not-configured state.
+No logo asset is bundled; Google's policy allows the text form.
+
+
+--------------------------------------------------------------------------------
+19. PAGINATION / LOAD MORE
+--------------------------------------------------------------------------------
+One page per explicit action. nextPageToken travels to the browser and back
+(validated) and is never stored. The run keeps has_more and pages_loaded. A
+failed Load more keeps earlier results. Google's 60-results-per-query cap
+applies. There is no automatic multi-page consumption.
+
+
+--------------------------------------------------------------------------------
+20. PROVIDER ERRORS
+--------------------------------------------------------------------------------
+Each case gets a calm, fixed message (docs/providers/google-places.md §6):
+  - not configured · timeout · rate/quota · setup/billing/permission
+  - invalid request · temporarily unavailable · unreadable response
+  - storage failure · no results
+No raw bodies or codes are shown (browser-verified). A failed first page
+marks the run failed, with Try again in the results and Retry in history.
+There are no automatic loops beyond the one bounded retry. The rest of
+Vleeds is unaffected; Discover itself loads without a key.
+
+
+--------------------------------------------------------------------------------
+21. RESPONSIVE BEHAVIOUR
+--------------------------------------------------------------------------------
+Verified at 1440, 390 and 360 (browser). 1280 and 768 use the same
+breakpoints:
+  - the form is 4 columns on xl, 2 on md, stacked on phones
+  - the results table is md+; cards below
+The not-configured state, search form, cards, attribution, decisions,
+errors and history have no horizontal overflow. Bottom navigation is
+unchanged. Buttons and suggestion chips are ≥ 44px on phones.
+
+
+--------------------------------------------------------------------------------
+22. ACCESSIBILITY
+--------------------------------------------------------------------------------
+  - All search controls are labelled; the custom location is a fieldset.
+  - The ICP suggestions are toggle buttons (aria-pressed).
+  - The results table has a caption; the cards are a labelled list.
+  - Each decision group is labelled, and button names include the company.
+  - Searching / result counts / decisions are announced (role=status,
+    aria-live).
+  - Errors use role=alert.
+  - The attribution has an accessible label and sr-only context.
+  - "About these results" is a native disclosure.
+  - External links announce that they open in a new tab.
+  - Targets are ≥ 44px on phones.
+Not done: an axe audit / screen-reader pass (carried).
+
+
+--------------------------------------------------------------------------------
+23. TESTS ADDED
+--------------------------------------------------------------------------------
+A. tests/unit/discovery.test.ts: 26 tests (network always mocked; no key)
+   Registry and capabilities:
+     - default provider; unknown key
+     - missing key → not_configured, no request
+     - loopback-only endpoint override (refused in production)
+     - durable id / transient fields
+   Field mask and request:
+     - exact mask, no wildcard, no banned fields
+     - POST + headers; query/geography/cursor/page size/region mapping
+     - documented endpoint; key only in a header
+   Query/geography composition; page-size clamping.
+   Mapping:
+     - several places, next token, missing optional fields
+     - category label; Place ID as external id; third-party attribution
+     - empty, repeated and malformed responses
+   Usage/errors:
+     - usage record (no key or content)
+     - cursor pass-through; empty search
+     - quota/permission/invalid → categories without retry
+     - bounded retry counted
+     - timeout via AbortController
+     - malformed body
+     - a message for every category
+   Input/decisions:
+     - request schema, cursor schema
+     - match state from durable data
+     - select → needs_enrichment / selected; dismiss; reset
+     - open-run rule
+B. tests/db/discovery.test.ts: 18 tests (PGlite)
+   - RLS on, no anon, no deletes
+   - runs only in their workspace
+   - members create in their own workspace (created_by, status running)
+   - ICP reference must be in the same workspace; revision needs profile
+   - status CHECKs (failed → code, completed/cancelled → time)
+   - immutable query/workspace; counts can't be set
+   - final runs and their candidates frozen
+   - candidates have no provider content columns
+   - candidates only in their workspace
+   - Place ID unique per run, allowed in another run
+   - candidate must use its run's workspace and provider
+   - matched company in the same workspace; existing ⇒ company
+   - decision states; selected ⇒ company; decided_by stamped; counts
+     maintained
+   - provider id immutable
+   - provider identity lookup through lead_sources is workspace-local
+   - usage: own workspace/run only; workspace-only visibility; append-only
+     and validated
+   Mutation check: a temporary migration opened discovery_runs reads,
+   dropped the run guard, the per-run uniqueness and the selected⇒company
+   CHECK, and made usage updatable. Result: 5/18 tests FAILED (every break
+   detected). The file was deleted and verified absent.
+C. Business-agnostic guard: provider names only in their adapter folder;
+   industry/place words and P1-E3 fixture names never in runtime code.
+D. scripts/ui-review/review-discover.mjs: 64 checks (§24).
+
+
+--------------------------------------------------------------------------------
+24. TEST RESULTS (final code)
+--------------------------------------------------------------------------------
+npm.cmd run verify ........................ EXIT 0
+  lint .................................... PASS
+  typecheck ............................... PASS
+  vitest .................................. PASS 11 files, 308/308
+      DB (PGlite): tenancy 36 · icp 41 · lead core 40 · imports 20 ·
+                   discovery 18
+      unit: 153 (incl. business-agnostic 3, discovery 26)
+  build (Next.js 16.4.0) .................. PASS
+  check:bundle ............................ PASS (no key/env names, no Google
+                                            endpoint or field-mask header in
+                                            client files; no fixtures in build)
+Discovery RLS/constraint mutation check ... PASS (5/18 failed when broken)
+Browser, final build, fresh mock each, mocked provider:
+  P1-E3 review-discover.mjs unconfigured .. PASS 8/8
+  P1-E3 review-discover.mjs configured .... PASS 56/56
+  P1-E2 review-imports.mjs (regression) ... PASS 81/81
+  P1-E1 review-leads.mjs (regression) ..... PASS 40/40
+  S2 review-settings.mjs (regression) ..... PASS 66/66
+  S1A review.mjs (regression) ............. PASS 50/50
+Business-agnostic guard ................... PASS
+Provider mocks in production .............. none (fixtures live in tests/ and
+                                            scripts/ui-review only)
+Real Supabase/Postgres .................... NOT RUN — STILL OPEN
+
+P1-E3 browser checks include:
+  - not configured: calm state, no form/attribution, history renders,
+    no overflow (desktop/360)
+  - ready: no search on load, default ICP preselected, ICP geographies
+    first, query prefilled + editable, suggestions, labelled controls
+  - results:
+      · typed query + geography
+      · Google Maps attribution (text, colour, nowrap) + third-party
+        attribution
+      · columns; New reference; Existing company + link to the right
+        company
+      · usage "1 request · 5 candidates" + month; About these results
+        (ranking)
+      · count announced
+  - select (saved for enrichment), dismiss, undo, select existing
+    (Selected)
+  - Load more (7 rows, 2 requests); Done reviewing → history with
+    counts/status
+  - history never shows provider names/addresses; nothing after a reload
+  - no results; quota message; outage message without raw details; Try
+    again succeeds; Seen before
+  - cancel; history shows Completed / Cancelled / Failed + Retry; monthly
+    usage persists
+  - member, workspace without ICP: typed location; another workspace's
+    provider links not visible
+  - 390/360: form fits, no search on load, cards, attribution visible,
+    44px decisions, select on a card, error, bottom navigation, no overflow
+  - the browser never calls Google or Supabase; the key never reaches the
+    browser
+
+
+--------------------------------------------------------------------------------
+25. LIVE PROVIDER SMOKE TEST STATUS
+--------------------------------------------------------------------------------
+LIVE GOOGLE PLACES TEST: NOT RUN — API KEY NOT CONFIGURED
+(GOOGLE_PLACES_API_KEY is absent from the server environment and
+.env.local.) This is not a failure of the story. The procedure is in
+docs/providers/google-places.md §9 (one generic query; record only
+success/failure, result count and field mask).
+
+
+--------------------------------------------------------------------------------
+26. CODE-QUALITY REVIEW
+--------------------------------------------------------------------------------
+Verified
+  Q1  Provider abstraction: the rest of Vleeds uses only types.ts and
+      registry.ts. A test confines provider names to their adapter folder.
+  Q2  Google isolation: the request/response shape, field mask, SKU hint,
+      status mapping and retention live in google-places/.
+  Q3  Retention: there are no content columns (DB test), the cursor isn't
+      stored, payloads aren't stored or logged, and history is
+      content-free (browser test).
+  Q4  Workspace relationships: every link is a composite same-workspace FK
+      (ICP, run, provider, company); RLS member policies; no deletes
+      (tested).
+  Q5  Candidate identity: unique per run; immutable; same id allowed
+      across runs.
+  Q6  Usage accounting: every request is recorded (including failures and
+      retries); append-only; nothing sensitive.
+  Q7  Server-only execution: the registry imports server-only; the client
+      calls server actions only. The bundle scan checks for the key name,
+      the endpoint and the field-mask header. The browser made no Google
+      or Supabase requests.
+  Q8  Environment: the key is never NEXT_PUBLIC_, read at request time and
+      never logged. The endpoint override is loopback-only and refused in
+      production. There is no startup failure without a key.
+  Q9  Errors: categories → fixed messages; raw bodies are discarded;
+      timeout; one bounded retry.
+  Q10 Input: Zod on every action; the ICP and geography are re-read
+      server-side by id; the cursor is bounded; UUIDs are checked; run
+      transitions are filtered.
+Follow-ups
+  F1 (Low)  There is no per-user or per-workspace rate limit beyond
+            explicit clicks and Google quotas. Consider a daily request
+            budget per workspace before wider rollout.
+  F2 (Low)  The usage totals query reads up to 5,000 events of the month
+            and sums them in memory. Move it to SQL if volume grows.
+  F3 (Low)  The "This search" totals count only the current month's
+            events. A run that spans a month boundary would under-count.
+            Cosmetic.
+  F4 (Low)  There is no Google Maps logo asset; the text attribution is
+            used. Revisit if a logo is preferred.
+  F5 (Info) Carried: no CSP; forbidden pages return HTTP 200; RLS helper
+            my_workspace_ids() still planned.
+
+
+--------------------------------------------------------------------------------
+27. CANONICAL-DESIGN DEVIATIONS
+--------------------------------------------------------------------------------
+No redesign. The new UI reuses PageHeader, Panel, PanelHeader, Field,
+inputClass, Button (primary/soft/secondary/ghost), StatusPill, Alert,
+EmptyState, the table/card patterns, the shell and the navigation.
+  D1 The Discover placeholder ("No discovery sources connected" +
+     prerequisites) is replaced by the working screen and a calm
+     not-configured state.
+  D2 Provider attribution is a footer text line in the results panel
+     (required by Google; not part of the canonical references).
+  D3 The usage summary is a small bordered definition list in the results
+     header (not a dashboard).
+  D4 The ICP category/keyword suggestions are pill-shaped toggle buttons.
+
+
+--------------------------------------------------------------------------------
+28. UNRESOLVED ISSUES
+--------------------------------------------------------------------------------
+  U1  PRE-PRODUCTION BLOCKER — REAL SUPABASE VERIFICATION STILL OPEN
+      (155 DB tests run only on PGlite).
+  U2  LIVE GOOGLE PLACES TEST NOT RUN (no API key configured).
+  U3  Browser checks use the UI-review mock (fake Supabase + fake Places
+      endpoint). Constraints are proven in tests/db; the adapter is proven
+      in unit tests.
+  U4  database.types.ts is still hand-maintained (+3 tables).
+  U5  Selected references (needs_enrichment) can't be turned into companies
+      yet. This is by design: it waits for a licence-compatible data source
+      (P1-E4).
+  U6  F1–F4 above; no cost estimates (no price snapshot).
+  U7  No axe audit / screen-reader pass (carried).
+  U8  Carried: HTTP 200 for forbidden pages; no CSP.
+  U9  1280px and 768px were not screenshotted separately. They share the
+      breakpoints verified at 1440/390/360.
+
+
+--------------------------------------------------------------------------------
+29. SCREENSHOTS (docs/reports/screenshots/P1-E3/)
+--------------------------------------------------------------------------------
+Production build + UI-review mock + MOCKED provider with fictional places.
+"Google Maps" attribution is visible wherever the mocked Places content is
+shown.
+  00-discover-not-configured-desktop.png  no API key
+  01-discover-ready-desktop.png           default ICP, geographies, suggestions
+  02-discover-results-desktop.png         results, statuses, usage, attribution
+  03-discover-selected-desktop.png        saved for enrichment / dismissed / undo
+  04-discover-existing-company-desktop.png existing company selected + link
+  05-discover-usage-desktop.png           after Load more (2 requests, 7)
+  06-discover-no-results-desktop.png
+  07-discover-provider-error-desktop.png  calm error + Try again
+  08-discover-history-desktop.png         completed / cancelled / failed + Retry
+  09-discover-ready-mobile.png            390px
+  10-discover-results-mobile.png          cards + attribution
+  11-discover-selected-mobile.png
+  12-discover-provider-error-mobile.png
+
+
+--------------------------------------------------------------------------------
+30. EXACT RECOMMENDED NEXT STORY
+--------------------------------------------------------------------------------
+First, still: close U1 (enable virtualization + Docker, then supabase start,
+db reset, db:types, SUPABASE_TEST_DB_URL test:db, verify). Optionally run
+the live Google smoke test (§25) once a key exists.
+
+Then, with explicit approval only:
+P1-E4 — Durable Company Data / Enrichment Provider Foundation:
+  - an enrichment-provider interface on the same capability/retention model
+    (durableCompanyFields: true)
+  - a first provider whose licence permits durable company data
+  - take needs_enrichment discovery references (and manual requests),
+    obtain company data, then feed it through the EXISTING P1-E2 pipeline:
+    lead-core normalization → classify/dedupe → create/merge/skip review →
+    ingest_lead → evidence with provider_key + external_record_id,
+    including the provider-reference link that makes "Existing company"
+    work in Discover
+  - usage accounting through provider_usage_events
+Decision-maker/contact discovery is a later phase. Apollo is not to be
+connected without explicit approval. No durable copying of Google Places
+content.
+
+P1-E3 stops here. No Apollo, contact enrichment, durable Google Places
+copying, automated scoring, calling, email or campaign work has been
+started. The canonical UI remains locked.
+================================================================================

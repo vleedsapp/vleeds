@@ -1,0 +1,614 @@
+================================================================================
+VLEEDS — COMPLETION REPORT
+Story:   P0-E1-S2 — Workspace Business Profile + ICP Configuration Foundation
+Date:    2026-10-08
+Status:  COMPLETE (development verification on embedded Postgres/PGlite).
+
+  ******************************************************************
+  *  REAL SUPABASE PRE-PRODUCTION VERIFICATION: STILL OPEN          *
+  *  The tenancy suite (now 77 tests: 36 + 41) has run ONLY on      *
+  *  PGlite with the Supabase shim, never on a real Supabase/       *
+  *  Postgres stack. Docker cannot start on this machine (BIOS      *
+  *  virtualization disabled). This remains a mandatory gate        *
+  *  before production. Not attempted or repaired in this story.    *
+  ******************************************************************
+================================================================================
+
+CONTENTS
+  1 Summary                 10 ICP editor                 19 Tests added
+  2 Files created           11 Geographies                20 Test results
+  3 Files modified          12 Decision makers            21 Security review
+  4 Migration/schema        13 Buying signals             22 Design deviations
+  5 icp_profiles structure  14 Exclusion signals          23 Unresolved issues
+  6 Validation schemas      15 Scoring configuration      24 Screenshots
+  7 RLS/access policies     16 Configuration-status rules 25 Recommended next story
+  8 Role permissions        17 Responsive behaviour
+  9 Business-profile edit   18 Accessibility
+
+
+--------------------------------------------------------------------------------
+1. SUMMARY
+--------------------------------------------------------------------------------
+A workspace can now define who it wants to sell to, entirely as data:
+  - its business profile is editable (name, primary domain, website, description)
+  - a new workspace-owned table public.icp_profiles stores ideal-customer
+    criteria, target geographies, decision-maker titles, buying signals,
+    exclusion signals and a scoring model as versioned, validated jsonb
+  - several profiles per workspace are supported by the schema; at most one
+    active default is enforced by the database; Settings edits the default
+  - six Settings rows are now live, each opening a sheet editor (right-side on
+    desktop, near-full-height bottom sheet on phones). Owners and admins edit;
+    members get the same sheets read-only. Status pills are computed from
+    saved data (Not configured / Partially configured / Configured /
+    No exclusions)
+  - enforcement is layered: RLS + column grants + CHECK constraints in the
+    database, then authentication, workspace re-authorization, role check and
+    Zod validation in every server action, then the same Zod schemas in the
+    browser for instant feedback
+  - 41 new adversarial RLS tests, 41 new unit tests, 66 new browser checks;
+    `npm.cmd run verify` passes; the S1A browser review still passes 50/50
+
+Not built, by design: discovery, Google Places/Apollo/any provider, enrichment,
+calling, campaigns, lead records, scoring of real companies, AI suggestions,
+multi-profile management UI.
+
+
+--------------------------------------------------------------------------------
+2. FILES CREATED
+--------------------------------------------------------------------------------
+Database
+  supabase/migrations/20261008000000_icp_configuration_foundation.sql
+Configuration (shared by browser + server; no business data)
+  src/lib/config/icp.ts               Zod schemas, types, limits, grade bands, error mapping
+  src/lib/config/icp-status.ts        configuration-completeness helper
+  src/lib/config/business-profile.ts  business-profile validation (shared with onboarding)
+  src/lib/config/countries.ts         neutral ISO 3166-1 alpha-2 reference list + Intl names
+Data Access Layer (split from src/lib/dal.ts; import "@/lib/dal" only)
+  src/lib/dal/index.ts                single public entry point (server-only)
+  src/lib/dal/core.ts                 auth, cached client, DataAccessError, mutation results
+  src/lib/dal/workspaces.ts           workspace reads + updateWorkspaceProfile
+  src/lib/dal/icp-profiles.ts         getDefaultIcpProfile, saveIcpSection
+Server actions
+  src/app/w/[workspaceId]/settings/actions.ts  updateBusinessProfile, saveIcpSection
+UI (src/components/settings/)
+  config-sheet.tsx                    shared modal sheet (dialog, dirty-close confirm, focus return)
+  fields.tsx                          TagInput, Switch, WeightBar, EntryCard, save hook, error wiring
+  editor-shared.tsx                   editor props, section sender, read-only helpers
+  business-profile-editor.tsx         Edit button + business profile sheet
+  prospecting-configuration.tsx       live configuration rows + inactive provider rows
+  ideal-customer-editor.tsx
+  geographies-editor.tsx
+  roles-signals-editors.tsx           decision makers, buying signals, exclusion signals
+  scoring-editor.tsx
+Tests
+  tests/db/icp-profiles.test.ts       41 adversarial RLS/constraint tests
+  tests/unit/icp-config.test.ts       39 unit tests
+Tooling
+  scripts/ui-review/review-settings.mjs  66 browser checks + screenshots 01-16
+Docs
+  docs/product/vleeds-icp-configuration.md
+  docs/reports/P0-E1-S2-vleeds-icp-configuration-foundation.txt (this file)
+  docs/reports/screenshots/P0-E1-S2/*.png (16)
+
+
+--------------------------------------------------------------------------------
+3. FILES MODIFIED
+--------------------------------------------------------------------------------
+  src/app/w/[workspaceId]/settings/page.tsx  live editors, statuses, role-aware Edit
+  src/lib/supabase/database.types.ts         + icp_profiles (hand-maintained, see §23)
+  src/app/workspaces/new/actions.ts          reuses shared business-profile validators
+                                             (behaviour unchanged)
+  src/app/workspaces/new/new-workspace-form.tsx  fixed pre-existing mis-encoded "…"
+                                             ("Creatingâ€¦" / "organizationâ€¦" were
+                                             visible in the UI)
+  tests/unit/business-agnostic.test.ts       + 2 guards (see §19)
+  scripts/ui-review/mock-supabase.mjs        test-only: in-memory Settings writes
+  docs/architecture/vleeds-data-model.md     icp_profiles implemented (§3a)
+  docs/architecture/vleeds-tenancy.md        DAL split, has_workspace_role, new suite
+  README.md                                  UI-review note for the S2 script
+Removed: src/lib/dal.ts (moved into src/lib/dal/, same exports + new ones).
+NOT modified: supabase/migrations/20261007000000_tenancy_foundation.sql,
+supabase/seed.sql, src/proxy.ts, auth actions, Supabase clients, env handling.
+
+
+--------------------------------------------------------------------------------
+4. MIGRATION / SCHEMA
+--------------------------------------------------------------------------------
+supabase/migrations/20261008000000_icp_configuration_foundation.sql (new; the S1
+migration is untouched). It contains:
+  - private.has_workspace_role(workspace_id, roles[])  SECURITY DEFINER,
+    search_path='', EXECUTE revoked from public/anon
+  - table public.icp_profiles (see §5) with CHECK constraints
+  - index icp_profiles_workspace_id_archived_at_idx (workspace_id, archived_at):
+    active-profile listing and the FK cascade
+  - unique partial index icp_profiles_one_default_per_workspace (workspace_id)
+    WHERE is_default AND archived_at IS NULL: the default rule and default lookup
+  - triggers: icp_profiles_bump_revision (private.bump_icp_revision),
+    icp_profiles_set_updated_at, icp_profiles_tenant_keys_immutable
+    ('workspace_id', 'created_by'), the latter two reusing the S1 functions
+  - grants (column-level), RLS enabled, three policies (§7)
+No other functions were added (no set-default RPC; see §5 "deviations").
+
+
+--------------------------------------------------------------------------------
+5. ICP_PROFILES STRUCTURE
+--------------------------------------------------------------------------------
+id uuid pk · workspace_id uuid → workspaces ON DELETE CASCADE (immutable)
+name text 1–120 · description text ≤2000 (the ideal-customer description)
+is_default bool · archived_at timestamptz
+schema_version int CHECK IN (1) · revision int ≥1 (server-managed)
+ideal_customer jsonb · target_geographies jsonb · decision_maker_titles jsonb
+buying_signals jsonb · exclusion_signals jsonb · scoring_model jsonb
+created_by uuid default auth.uid() (immutable) · created_at · updated_at
+UNIQUE (workspace_id, id) for future composite FKs (campaigns, lead_scores)
+
+CHECK constraints
+  - schema_version in (1)
+  - NOT (is_default AND archived_at IS NOT NULL)
+  - ideal_customer: object, ≤32 KB, minEmployees ≥ 0, minEmployees ≤ maxEmployees
+  - target_geographies: array, ≤100 items, ≤64 KB
+  - decision_maker_titles / buying_signals / exclusion_signals: array, ≤50, size-capped
+  - scoring_model: object, ≤8 KB, thresholds.a and thresholds.b numeric with
+    1 ≤ b < a ≤ 100 (missing/non-numeric thresholds rejected)
+
+Revision: +1 by trigger when any configuration column changes; unchanged
+otherwise. Not granted to API roles. Saves are optimistic: the update is
+filtered by the revision the editor opened with; a mismatch returns "someone
+else changed this configuration" instead of overwriting. No history table or
+event sourcing: campaign-time immutable snapshots (or pinned revisions) will
+be introduced with campaigns, and lead scores will record profile id + revision.
+
+Deviations from the suggested shape (deliberate):
+  D-S1 Section columns are NULLABLE with no default. NULL = never saved; an
+       empty array saved on purpose is meaningful ("No exclusions"). Defaults
+       of '{}'/'[]' would make "never configured" indistinguishable.
+  D-S2 No set-default function. The partial unique index blocks a second
+       default; switching is "clear old, set new" in one transaction (tested).
+       No UI needs it yet, so no function was added.
+  D-S3 jsonb keys are camelCase (countryCode, minEmployees…), matching the
+       spec's geography example; category-weight keys use the spec's
+       snake_case identifiers (company_fit, …).
+  D-S4 New helper private.has_workspace_role (the data-model plan named it);
+       needed for owner/admin writes on a workspace-keyed table.
+  D-S5 B threshold ≥ 1 (and therefore A ≥ 2): with B = 0 the C range would be
+       empty, which the spec calls incoherent.
+  D-S6 Every geography requires a country (ISO code). A bare "region" with no
+       country is ambiguous across countries; requiring the country avoids
+       any single-country assumption.
+
+
+--------------------------------------------------------------------------------
+6. VALIDATION SCHEMAS (src/lib/config/icp.ts, schema_version 1)
+--------------------------------------------------------------------------------
+Common: text is trimmed with internal whitespace collapsed; optional text ""→null;
+objects are strict (unknown keys rejected) except geography items, whose derived
+fields are stripped and recomputed; duplicate checks are case-insensitive on
+normalized text; entry ids must be UUIDs and unique within their list.
+
+idealCustomerSectionSchema  { name 1–120, description ≤2000|null, idealCustomer }
+  idealCustomer  { industries[≤30], companySize{minEmployees,maxEmployees},
+                   characteristics[≤30], keywords[≤30], notes ≤2000|null }
+  tags 1–80 chars, no duplicates; employees: whole numbers 0–10,000,000 or
+  null; min ≤ max
+geographiesSchema [≤100] { id, countryCode (ISO alpha-2, case-insensitive in),
+                   region ≤120|null, city ≤120|null, label ≤120|null }
+                   → stored with countryName (server-derived); duplicate
+                   (country, region, city) targets rejected
+decisionMakersSchema [≤50] { id, title 1–120, priority primary|secondary|fallback,
+                   seniority executive|director|manager|individual_contributor|null }
+buyingSignalsSchema [≤50] { id, name 1–80, description ≤500|null,
+                   weight integer 1–100, enabled }
+exclusionSignalsSchema [≤50] { id, name, description, behavior
+                   hard_exclude|penalty, penalty, enabled }; penalty required
+                   (1–100) for penalty, must be null for hard_exclude
+scoringModelSchema { thresholds{a,b}, categoryWeights{company_fit, geography_fit,
+                   decision_maker_fit, buying_signal_fit} }; integers;
+                   1 ≤ b < a ≤ 100; weights 0–100 summing to exactly 100
+icpSectionInputSchema  discriminated union on `section` with
+                   { profileId uuid|null, revision int≥1|null, value }
+businessProfileSchema { name 1–120, primaryDomain (normalized hostname)|null,
+                   websiteUrl http(s)|null, description ≤2000|null }, strict
+
+Stored data is parsed again on read; a section that no longer matches is
+treated as unsaved and logged server-side (never shown half-parsed).
+
+
+--------------------------------------------------------------------------------
+7. RLS / ACCESS POLICIES
+--------------------------------------------------------------------------------
+RLS ENABLED on icp_profiles (catalog test covers every public table).
+Privileges: anon nothing. authenticated:
+  SELECT (all columns)
+  INSERT (workspace_id, name, description, is_default, schema_version,
+          ideal_customer, target_geographies, decision_maker_titles,
+          buying_signals, exclusion_signals, scoring_model)
+  UPDATE (name, description, is_default, archived_at, schema_version,
+          + the six jsonb columns)
+  → id, created_by, revision, timestamps never writable; workspace_id not
+    updatable (and trigger-protected); no DELETE privilege.
+Policies (TO authenticated):
+  icp_profiles_select_member  SELECT  private.is_workspace_member(workspace_id)
+  icp_profiles_insert_admin   INSERT  private.has_workspace_role(workspace_id, {owner,admin})
+  icp_profiles_update_admin   UPDATE  same, USING and WITH CHECK
+  (no DELETE policy)
+Workspaces (unchanged S1 policy): UPDATE by owner/admin — used for business
+profile editing.
+
+
+--------------------------------------------------------------------------------
+8. ROLE PERMISSIONS
+--------------------------------------------------------------------------------
+                                      owner  admin  member  other org/outsider
+Read business profile                   ✓      ✓      ✓         ✗
+Edit business profile                   ✓      ✓      ✗         ✗
+Read ICP configuration                  ✓      ✓      ✓ (read-only sheets)  ✗
+Create / update ICP profile             ✓      ✓      ✗         ✗
+Archive ICP profile                     ✓      ✓      ✗         ✗
+Change default ICP                      ✓      ✓      ✗         ✗
+Delete ICP profile                      ✗      ✗      ✗         ✗
+Admins keep every S1 restriction on owner memberships (unchanged).
+Enforced in: RLS + grants (authoritative), server actions (role check before
+any write, for clear errors), UI (members see no Edit button and read-only
+sheets — convenience only).
+
+
+--------------------------------------------------------------------------------
+9. BUSINESS-PROFILE EDITING
+--------------------------------------------------------------------------------
+Edit (owners/admins) opens the sheet: Workspace name, Primary domain, Website,
+Description, with Save / Cancel. Validation runs in the browser and again in
+updateBusinessProfile (strict Zod), which writes exactly four columns via
+updateWorkspaceProfile; a refused update (zero rows under RLS) is reported as
+"Only owners and admins…". On success the action calls refresh(): the card
+(and the workspace switcher) update in place, no navigation, and focus returns
+to Edit. Errors show inline under the field (aria-describedby) plus a summary
+alert. The slug is not changed by a rename. logo_url left out (not needed; no
+upload path exists). Concurrency: last write wins (see §23).
+
+
+--------------------------------------------------------------------------------
+10. ICP EDITOR
+--------------------------------------------------------------------------------
+Profile name (defaults to "Default profile" for a new workspace), ideal-customer
+description, industries/categories as removable chips, company size min/max,
+company characteristics chips, positive keyword chips, notes. Chips are added
+with Enter, comma or the Add button; duplicates are refused immediately; each
+chip has a "Remove <kind> <value>" button. The first save of ANY section creates
+the workspace's default profile (no SQL or setup needed); the sheet says so.
+
+
+--------------------------------------------------------------------------------
+11. GEOGRAPHIES
+--------------------------------------------------------------------------------
+Add/edit form: Country (select of all ISO countries, names from Intl), Region
+/state/province, City/locality, optional Display label. Saved targets appear as
+compact rows with a scope line (Country / Region · <country> / City · <country>)
+and labelled Edit / Remove buttons. Editing loads a row into the form ("Update
+target"/"Cancel edit"). Duplicate targets are refused. Saving with a half-
+filled form asks the user to add or clear it first. No maps, autocomplete or
+external API.
+
+
+--------------------------------------------------------------------------------
+12. DECISION MAKERS
+--------------------------------------------------------------------------------
+"Add role" appends a row and focuses its title. Each row: Title, Priority
+(Primary/Secondary/Fallback; first role defaults to Primary), optional
+Seniority, Remove. Duplicate titles (trim/space/case-insensitive) are rejected
+on the offending row. Read-only view lists titles with a priority pill.
+
+
+--------------------------------------------------------------------------------
+13. BUYING SIGNALS
+--------------------------------------------------------------------------------
+"Add signal" → name, optional description, weight (1–100, default 50) with a
+compact bar beside the number, Enabled switch (role="switch", state also in
+text), Remove. No suggestions, no AI.
+
+
+--------------------------------------------------------------------------------
+14. EXCLUSION SIGNALS
+--------------------------------------------------------------------------------
+"Add exclusion" → name, optional description, "When a company matches":
+Exclude (hard exclusion) or Lower score (penalty, points 1–100, default 20),
+Enabled switch, Remove. Calm treatment: neutral cards; hard exclusion shown as a
+neutral "Excludes" pill with a ban icon in read-only views; no red. Saving an
+empty list is allowed and records "No exclusions".
+
+
+--------------------------------------------------------------------------------
+15. SCORING CONFIGURATION
+--------------------------------------------------------------------------------
+"A grade from" / "B grade from" inputs with a live preview that reflects the
+values (e.g. A 80–100 Strongest fit · B 55–79 Reasonable fit · C 0–54 Weaker
+fit); incoherent input hides the preview and explains the rule. Category
+weights (company, geography, decision-maker, buying signals) with bars and a
+running "Total n of 100". An unsaved model is pre-filled with suggestions
+(A 75 / B 50; 40/20/20/20) clearly labelled as not saved; the status stays
+"Not configured" until Save. No scores are computed anywhere.
+
+
+--------------------------------------------------------------------------------
+16. CONFIGURATION-STATUS RULES (src/lib/config/icp-status.ts)
+--------------------------------------------------------------------------------
+Only saved data counts; NULL (never saved) is always Not configured.
+  Ideal customer   Configured = description AND ≥1 company criterion
+                   (industry/characteristic/keyword or a min/max size);
+                   Partially configured = only one of the two; else Not configured
+  Geographies      Configured = ≥1 target; else Not configured
+  Decision makers  Configured = ≥1 title; else Not configured
+  Buying signals   Configured = ≥1 ENABLED signal; Partially configured = signals
+                   exist but all disabled; else Not configured
+  Exclusions       Not configured = never saved; "No exclusions" = saved with
+                   none enabled (green, counts as configured); Configured = ≥1
+                   enabled exclusion
+  Scoring          Configured = a valid model saved; else Not configured
+Pill tones: attention (peach) / warning (amber) / brand (green), always with
+text. Enrichment providers and Calling provider: "Not configured" + "Available
+in a later setup step", not interactive.
+
+
+--------------------------------------------------------------------------------
+17. RESPONSIVE BEHAVIOUR
+--------------------------------------------------------------------------------
+≥640px: 560px right-side sheet, full height, rounded left corners, drawer
+shadow; Settings page visible and dimmed behind it.
+<640px: bottom sheet at 92dvh with drag-handle bar, sticky header and footer,
+safe-area padding; footer buttons 44px, full-width pair.
+Settings rows below 640px place the status pill under the row text (so text is
+not squeezed at 360px). Verified at 1440, 390 and 360px: no horizontal page or
+sheet overflow, every editor's footer visible and reachable, sheet anchored to
+the bottom edge.
+
+
+--------------------------------------------------------------------------------
+18. ACCESSIBILITY
+--------------------------------------------------------------------------------
+- Sheets are modal <dialog>s: labelled by title (aria-labelledby) and described
+  by the subtitle; page behind is inert; Escape closes a clean sheet; focus
+  goes into the sheet on open and returns to the opening control on close
+  (verified for Edit and for the row buttons).
+- Dirty sheets: Escape, Close and backdrop ask "Discard your unsaved
+  changes?" with focus moved to "Keep editing"; Cancel discards explicitly;
+  the browser's leave-page warning is armed while dirty.
+- Every control has a bound <label> (or legend); errors are rendered with ids
+  and linked via aria-describedby + aria-invalid; errors clear once the user
+  edits after a failed save.
+- Icon-only buttons have specific names ("Remove Germany", "Edit California",
+  "Remove keyword advisory", "Remove Founder"); switches use role="switch"
+  with the state also shown as text; statuses are text, not colour alone.
+- Configuration rows are real buttons (keyboard-operable, aria-haspopup=dialog).
+- Touch targets ≥44px on phones (footer, add/remove/edit, switches, radios).
+- 40 Tab presses in an open sheet never reached page content behind it.
+Not done: automated axe audit and screen-reader pass (§23).
+
+
+--------------------------------------------------------------------------------
+19. TESTS ADDED
+--------------------------------------------------------------------------------
+A. tests/db/icp-profiles.test.ts — 41 tests, same method as S1 (SET LOCAL ROLE +
+   JWT claims, rolled back; denied writes re-checked as DB owner). Fixture adds
+   a third organization (C) so cross-org cases are not just A↔B.
+   Reads (8): owner/admin/member read own; foreign org by id/by workspace;
+     Org A user vs B and C; multi-org user sees exact union; outsider nothing;
+     anon denied read+insert; role helper denies member/foreign.
+   Creates (7): owner/admin create (created_by = caller, revision 1); member
+     denied; foreign workspace denied; multi-org member-only org denied;
+     outsider denied everywhere; created_by / revision cannot be supplied.
+   Updates (8): owner/admin update and revision increments; no-op update keeps
+     revision; member zero rows; foreign zero rows; workspace_id immutable (to
+     same-org and other-org workspace, and even as table owner via trigger);
+     created_by/revision cannot be forged; stale-revision update changes nothing.
+   Archival (6): owner/admin archive; default cannot be archived while
+     default (23514) but can with is_default cleared; member and foreign
+     denied; no hard delete for any role.
+   Default (4): second default rejected on insert and on promote (23505);
+     clear-then-set switch in one transaction; archived former default does
+     not block; a default in A2 independent of A1/B1, and clearing defaults
+     cannot touch B1.
+   Constraints (8): schema_version 0/2; wrong top-level types for all six
+     columns; oversized lists; incoherent thresholds (a=b, a<b, a>100, b=0,
+     strings, missing); valid model accepted; employee min>max and negative;
+     blank name, long description.
+   Mutation check: a temporary migration made SELECT `using (true)`, let
+     members UPDATE, dropped the default index and the immutability trigger →
+     9/41 tests FAILED as required; the file was then deleted.
+B. tests/unit/icp-config.test.ts — 39 tests: ideal-customer normalization,
+   names, size ranges (open-ended, min>max, negative, fractional, NaN, too
+   large), duplicate/long tags, strict keys; geographies (country/region/city
+   for several countries, ISO validation, duplicates, duplicate ids, derived
+   fields recomputed, limits); decision-maker duplicates after normalization,
+   invalid priority/seniority; buying-signal weights (0, 101, 50.5, NaN, −5);
+   exclusion behaviours and penalties; scoring thresholds and weight totals;
+   grade bands; mutation envelope (wrong section, wrong value type, bad ids,
+   revision 0, extra keys); completeness rules for every section incl.
+   "No exclusions"; business-profile normalization and rejection (incl.
+   javascript: URL and extra fields).
+C. tests/unit/business-agnostic.test.ts — +2: (1) example fixture values
+   (e.g. the review's industries, titles, places, signals) must not appear in
+   src/ or migrations outside build-excluded fixtures; (2) an invented,
+   unrelated business (non-US geographies, non-English titles) validates
+   without code changes. Existing guard unchanged.
+D. scripts/ui-review/review-settings.mjs — 66 browser checks (see §20).
+
+
+--------------------------------------------------------------------------------
+20. TEST RESULTS (final code)
+--------------------------------------------------------------------------------
+npm.cmd run verify ........................ EXIT 0
+  lint .................................... PASS (0 problems)
+  typecheck (next typegen && tsc) ......... PASS
+  vitest .................................. PASS 5 files, 128/128
+      tenancy (S1, unchanged) 36 · icp_profiles 41 · unit 51
+  build (Next.js 16.4.0) .................. PASS (12 routes)
+  check:bundle ............................ PASS 21 client files, 0 secrets;
+                                            0 fixture artifacts in 343 build files
+RLS mutation check ........................ PASS (9/41 failed under broken policies)
+Browser — S2 review (review-settings.mjs) . PASS 66/66 (final build, fresh mock)
+Browser — S1A regression (review.mjs) ..... PASS 50/50 (final build)
+Business-agnostic guard ................... PASS (3 tests)
+Service-role credential / browser DB client  none (bundle scan; 0 browser
+                                            requests to Supabase in both reviews)
+Real Supabase/Postgres run ................ NOT RUN — STILL OPEN (see header)
+
+S2 browser checks cover: owner/admin edit controls; member read-only (no Edit,
+no inputs, no Save, explanation); profile validation + aria wiring + in-place
+update + focus return; dirty Escape → confirm → keep/discard; Cancel discards;
+ICP chips, duplicate refusal, min>max, tag removal; geography add/duplicate/
+remove/edit; role add/focus/duplicate/remove/priority; weight >100; switch;
+empty exclusions → "No exclusions"; penalty required; scoring A≤B, weights≠100,
+live preview; every status pill changes truthfully and persists after reload;
+right-side sheet geometry; Tab containment; Escape + focus return to row;
+no overflow at 1440/390/360; mobile sheet geometry, visible footer and 44px
+targets for all 7 editors at 390 and 360; no browser calls to Supabase.
+
+Defects found and fixed during verification
+  - Lint: setState inside an effect (focus helper) → ref-based; aria-disabled
+    on <li> → data attribute.
+  - Field errors stayed visible after the user corrected the field → errors
+    now clear once the values change after a failed save.
+  - Review-script issues only (input clearing, Tab-check semantics for native
+    modal dialogs).
+  - Pre-existing: mojibake "â€¦" in the onboarding form (fixed).
+
+
+--------------------------------------------------------------------------------
+21. SECURITY REVIEW
+--------------------------------------------------------------------------------
+Inspected: new RLS policies, grants, triggers, helper; server actions; DAL;
+client components and bundle; error paths.
+
+Verified
+  S1  Workspace authorization: every action validates the workspace id as a
+      UUID, re-loads it through RLS (findWorkspace) and checks the caller's
+      role before writing; RLS re-checks owner/admin on the row. Foreign,
+      missing and malformed ids all yield "This workspace is not available."
+  S2  Role permissions: members cannot write (tests + action check); admins
+      have owner-equivalent configuration rights only.
+  S3  Input validation: strict Zod on every server mutation (unknown keys
+      rejected), list and length limits, plus DB CHECKs for types, sizes,
+      schema version and core bounds. Browser validation is UX only.
+  S4  Mass assignment: the DAL writes a fixed column map per section; client
+      input is never spread into an insert/update; is_default, archived_at,
+      workspace_id, created_by and revision cannot be set from the editors.
+  S5  Immutable ownership: workspace_id/created_by protected by trigger and
+      missing grants; revision server-managed (tested, incl. as table owner).
+  S6  User-supplied ids: workspaceId re-authorized; profileId updates are
+      also filtered by workspace_id (a profile id from another workspace
+      matches nothing) and by RLS; jsonb entry ids are UUIDs scoped to one
+      profile with no authorization meaning.
+  S7  Errors: DB error codes are mapped to fixed messages; raw messages are
+      only logged server-side; read failures go to the existing generic
+      error boundary.
+  S8  No privileged credentials: no service-role path added; bundle scan
+      clean; the browser made zero requests to Supabase.
+  S9  No open redirect: actions accept no navigation targets; the only
+      redirect is the fixed "/login".
+  S10 Concurrency: optimistic revision check prevents silent overwrite of
+      ICP configuration; a racing first save cannot create two defaults.
+  S11 SECURITY DEFINER helper pins search_path='' and is not executable by
+      anon (existing catalog tests now include it).
+
+Findings / recommendations
+  F1 (Low)  Business-profile saves are last-write-wins (workspaces has no
+            revision column). Acceptable for 4 descriptive fields.
+  F2 (Low)  Per-entry jsonb rules (weights, penalties, duplicates, ISO codes)
+            are enforced by Zod, not the database. A client bypassing the app
+            with direct API access is still limited to owners/admins of that
+            workspace and by the DB size/type/threshold checks. Add DB-side
+            JSON validation (e.g. pg_jsonschema) if direct API writes are ever
+            allowed.
+  F3 (Low)  Carried over: no Content-Security-Policy yet (S1 F1).
+  F4 (Info) Member attempts to call the server actions directly were not
+            exercised end-to-end in a browser (would need the real stack);
+            covered by the action's role check and the RLS tests.
+  F5 (Info) website_url still accepts http:// (S1 rule); javascript: and
+            other schemes are rejected; links open with noopener noreferrer.
+
+
+--------------------------------------------------------------------------------
+22. CANONICAL DESIGN DEVIATIONS
+--------------------------------------------------------------------------------
+No redesign. Only existing tokens and primitives (Panel, PanelHeader, Button,
+IconButton, IconCircle, StatusPill, Field, Alert, inputClass) were used; the
+sheet extends the existing drawer and mobile-sheet patterns.
+  G1 Configuration rows are now full-width buttons with a subtle hover fill
+     (they were inert in S1A).
+  G2 Enrichment/Calling rows: chevron removed (not clickable) and a muted
+     "Available in a later setup step" line added.
+  G3 Members see no Edit button on Business profile (instead of a disabled
+     one); the "Your role" pill already explains the role.
+  G4 New status tones from existing tokens: Partially configured = warning
+     tint, Configured/No exclusions = brand tint (Not configured unchanged).
+  G5 Below 640px the status pill sits under the row text instead of beside it,
+     so "Partially configured" never squeezes the label at 360px.
+  G6 New surfaces not in the canonical references: the editor sheet (560px
+     right drawer / 92dvh bottom sheet), chips, entry sub-cards, a switch,
+     a weight bar and grade-range tiles — all built from existing tokens.
+
+
+--------------------------------------------------------------------------------
+23. UNRESOLVED ISSUES
+--------------------------------------------------------------------------------
+  U1  PRE-PRODUCTION BLOCKER — REAL SUPABASE VERIFICATION STILL OPEN. Both DB
+      suites (77 tests) have run only on PGlite. Needs AMD-V/SVM enabled +
+      Docker (or a disposable hosted project), then the commands in §25.
+  U2  Browser checks use the UI-review mock, not real Supabase Auth/PostgREST
+      (the mock does not enforce constraints; that is proven by tests/db).
+  U3  database.types.ts is still hand-maintained; regenerate when the stack runs.
+  U4  No UI for multiple profiles, profile switching, archiving or changing the
+      default (schema + RLS + tests support them; out of scope by design).
+  U5  Business-profile last-write-wins (F1).
+  U6  Per-entry jsonb rules not DB-enforced (F2).
+  U7  No automated axe audit / screen-reader pass (carried from S1A).
+  U8  Country names are English (Intl); localisation later.
+  U9  seed.sql has no ICP data on purpose (a fresh workspace exercises first-
+      time setup); the mock starts unconfigured too and must be restarted
+      before each review-settings run.
+  U10 Carried: forbidden-workspace pages return HTTP 200 with the uniform
+      "Not available" page.
+  U11 Cold builds take 1.5–6 minutes on this machine.
+
+
+--------------------------------------------------------------------------------
+24. SCREENSHOTS (docs/reports/screenshots/P0-E1-S2/)
+--------------------------------------------------------------------------------
+Production build + UI-review mock + generic fixture values only.
+  01-settings-unconfigured-desktop.png   all six rows Not configured
+  02-business-profile-edit-desktop.png   profile sheet
+  03-icp-editor-desktop.png              ideal customer sheet (first-time note)
+  04-geographies-desktop.png             US, California (state) targets
+  05-decision-makers-desktop.png         two roles with priorities
+  06-buying-signals-desktop.png          weights + switches
+  07-exclusion-signals-desktop.png       hard exclusion + penalty
+  08-scoring-rules-desktop.png           thresholds 80/55 + preview + weights
+  09-settings-configured-desktop.png     all six Configured
+  10-settings-member-readonly-desktop.png member, read-only sheet
+  11-settings-mobile.png                 390px, configured
+  12-business-profile-edit-mobile.png    390px bottom sheet
+  13-icp-editor-mobile.png
+  14-geographies-mobile.png
+  15-decision-makers-mobile.png
+  16-scoring-mobile.png
+
+
+--------------------------------------------------------------------------------
+25. RECOMMENDED NEXT STEP / STORY
+--------------------------------------------------------------------------------
+First, close U1 (unchanged procedure): enable virtualization, start Docker, then
+  npx.cmd supabase start
+  npx.cmd supabase db reset
+  npm.cmd run db:types
+  $env:SUPABASE_TEST_DB_URL="postgresql://postgres:postgres@127.0.0.1:54322/postgres"; npm.cmd run test:db
+  npm.cmd run verify
+and append the results to the P0-E1-S1 report.
+
+Then, with explicit approval only:
+P1-E1 — Company + Contact Lead Core: companies, contacts, lead source
+evidence, qualification state, lead score storage (keyed by icp_profile_id +
+revision), deduplication identity and suppression records, with RLS and
+adversarial tests. Discovery providers come after the lead core.
+
+P0-E1-S2 stops here. No discovery, enrichment, calling, campaign or scoring
+work has been started. The canonical UI remains locked.
+================================================================================
