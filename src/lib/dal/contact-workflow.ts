@@ -67,13 +67,13 @@ export async function recordContactAttempt(
     p_contact_id: a.contactId,
     p_request_id: a.requestId,
     p_disposition: a.disposition,
-    p_note: a.note,
-    p_source_task_id: a.sourceTaskId,
-    p_next_kind: a.next?.kind ?? null,
-    p_next_due_at: a.next ? a.next.dueAt.toISOString() : null,
-    p_next_note: a.next?.note ?? null,
-    p_suppression_scope: a.scope,
-    p_suppression_reason: a.reason,
+    p_note: a.note ?? undefined,
+    p_source_task_id: a.sourceTaskId ?? undefined,
+    p_next_kind: a.next?.kind,
+    p_next_due_at: a.next?.dueAt.toISOString(),
+    p_next_note: a.next?.note ?? undefined,
+    p_suppression_scope: a.scope ?? undefined,
+    p_suppression_reason: a.reason ?? undefined,
   });
   if (error) return { ok: false, ...failure("recordContactAttempt", error) };
   const r = (data ?? {}) as { attempt_id?: string; task_id?: string | null; replayed?: boolean };
@@ -91,7 +91,7 @@ export async function scheduleFollowUp(
     p_contact_id: t.contactId,
     p_kind: t.kind,
     p_due_at: t.dueAt.toISOString(),
-    p_note: t.note,
+    p_note: t.note ?? undefined,
   });
   if (error) return { ok: false, ...failure("scheduleFollowUp", error) };
   return { ok: true, data: { id: String(data) } };

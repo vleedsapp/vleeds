@@ -45,7 +45,19 @@ Public sign-up is disabled. Create users in Supabase Studio (http://127.0.0.1:54
 | `npm run test:db` | Tenant-isolation suite. Uses embedded Postgres (PGlite) by default; set `SUPABASE_TEST_DB_URL=postgresql://postgres:postgres@127.0.0.1:54322/postgres` to run it against the local Supabase stack. |
 | `npm run test:unit` | Unit tests, including the business-agnostic guard |
 | `npm run check:bundle` | Fails if secrets / service-role keys / server env names appear in `.next/static` |
-| `npm run db:types` | Regenerates `src/lib/supabase/database.types.ts` from the local DB |
+| `npm run db:types` | Regenerates `src/lib/supabase/database.types.ts` from the local DB (stack must be running) |
+
+### Database types
+
+`src/lib/supabase/database.types.ts` is **generated** by `npm run db:types` (`supabase gen types typescript --local --schema public`). Never edit it by hand: after a migration, run `npm run db:reset` then `npm run db:types`, commit the result, and `npm run typecheck` must pass with no touch-up.
+
+Application-facing aliases live outside the generated file, derived from `Database`, in `src/lib/supabase/app-types.ts` (e.g. `MembershipRole`, and result-row types for SQL functions). The generator cannot see SQL function nullability, so it reports every function argument and `RETURNS TABLE` column as non-null:
+
+- Optional arguments are `DEFAULT NULL` in SQL; callers omit them (`?? undefined`) instead of sending `null`.
+- Result columns that can be NULL are widened back with `WithNullable` in `app-types.ts`; DAL code annotates RPC results with those row types.
+- The single RPC whose *required* arguments accept NULL (`save_lead_score_trusted`: `p_score`/`p_grade` for excluded results) gets a narrow schema overlay on its private client in `src/lib/supabase/trusted-score-writer.ts`.
+
+Real-stack verification: on 2026-10-11 `supabase start`, `supabase db reset` (all migrations through P1-E7) and the full DB suite against real Supabase Postgres (219/219) passed.
 
 ### Design system
 

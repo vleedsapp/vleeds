@@ -4,7 +4,7 @@ import { notFound } from "next/navigation";
 import { cache } from "react";
 import type { BusinessProfile } from "@/lib/config/business-profile";
 import { isUuid } from "@/lib/navigation";
-import type { MembershipRole } from "@/lib/supabase/database.types";
+import type { MembershipRole } from "@/lib/supabase/app-types";
 import { DataAccessError, failureFromDbError, requireUser, supabase, type MutationResult } from "./core";
 
 export type WorkspaceSummary = {

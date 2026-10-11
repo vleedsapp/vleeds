@@ -71,7 +71,6 @@ export async function addContactManual(
     p_company: { id: companyId, fields: {} } as Json,
     p_contact: { fields: contactColumns(contact), is_primary: isPrimary } as Json,
     p_evidence: evidenceFor(null, contact, "manual") as Json,
-    p_import_row_id: null,
   });
   if (error) return { ok: false, reason: failureFromDbError("addContactManual", error) };
   const result = data as { contact_id?: string } | null;

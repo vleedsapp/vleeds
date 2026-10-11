@@ -8,6 +8,7 @@ import { DISPOSITIONS, TASK_KINDS, type ContactFacts, type Disposition, type Due
 import type { DueRowView, TodayView } from "@/lib/contact-workflow/view";
 import { formatLocation } from "@/lib/lead-core/display";
 import { GRADES, locationSchema, QUALIFICATION_STATES, type Grade, type QualificationState } from "@/lib/lead-core/schemas";
+import type { TodayDueTaskRow, TodayReadyCandidateRow } from "@/lib/supabase/app-types";
 import type { Json } from "@/lib/supabase/database.types";
 import { DataAccessError, requireUser, supabase } from "./core";
 import { listIcpProfilesForDiscovery } from "./discovery";
@@ -106,8 +107,9 @@ export async function getTodayView(workspace: { id: string; timezone: string }, 
   if (attempts.error) throw new DataAccessError("today.attempts", attempts.error);
 
   // Ready to contact
+  const readyRows: TodayReadyCandidateRow[] = candidates.data ?? [];
   const ready = buildReadyQueue(
-    (candidates.data ?? []).map((r) => ({
+    readyRows.map((r) => ({
       companyId: r.company_id,
       name: r.canonical_name,
       location: location(r.location),
@@ -126,7 +128,7 @@ export async function getTodayView(workspace: { id: string; timezone: string }, 
   );
 
   // Due work
-  const dueRows = due.data ?? [];
+  const dueRows: TodayDueTaskRow[] = due.data ?? [];
   const queues = buildDueQueue(
     dueRows.map(
       (r): DueTaskFacts => ({

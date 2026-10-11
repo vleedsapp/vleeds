@@ -15,6 +15,7 @@ import { companyColumns, contactColumns, evidenceFor as evidenceForIngest } from
 import type { ExistingCompany } from "@/lib/imports/merge";
 import type { NormalizedCompany, NormalizedContact } from "@/lib/imports/rows";
 import { isUuid } from "@/lib/navigation";
+import type { ListCompaniesRow } from "@/lib/supabase/app-types";
 import type { Json } from "@/lib/supabase/database.types";
 import { contactsForCompanies } from "./contacts";
 import { DataAccessError, failureFromDbError, requireUser, supabase, type MutationResult } from "./core";
@@ -46,18 +47,18 @@ export const listCompanies = cache(async (workspaceId: string, query: LeadListQu
   await requireUser();
   const { data, error } = await (await supabase()).rpc("list_companies", {
     p_workspace_id: workspaceId,
-    p_qualification: query.qualification,
-    p_grade: query.grade,
-    p_restricted: query.restricted,
-    p_has_contact: query.hasContact,
-    p_country: query.country,
+    p_qualification: query.qualification ?? undefined,
+    p_grade: query.grade ?? undefined,
+    p_restricted: query.restricted ?? undefined,
+    p_has_contact: query.hasContact ?? undefined,
+    p_country: query.country ?? undefined,
     p_sort: query.sort,
     p_limit: LEADS_PAGE_SIZE,
     p_offset: (query.page - 1) * LEADS_PAGE_SIZE,
   });
   if (error) throw new DataAccessError("listCompanies", error);
 
-  const rows = data ?? [];
+  const rows: ListCompaniesRow[] = data ?? [];
   const ids = rows.map((c) => c.id);
   const contacts = await contactsForCompanies(workspaceId, ids);
   const evidence = await evidenceFor(workspaceId, ids, contacts.map((c) => c.id));
@@ -189,9 +190,8 @@ export async function createCompanyManual(
   const { data, error } = await (await supabase()).rpc("ingest_lead", {
     p_workspace_id: workspaceId,
     p_company: { fields: companyColumns(company) } as Json,
-    p_contact: contact ? ({ fields: contactColumns(contact), primary_if_none: true } as Json) : null,
+    p_contact: contact ? ({ fields: contactColumns(contact), primary_if_none: true } as Json) : undefined,
     p_evidence: evidenceForIngest(company, contact, "manual") as Json,
-    p_import_row_id: null,
   });
   if (error) return { ok: false, reason: failureFromDbError("createCompanyManual", error) };
   const result = data as { company_id?: string } | null;

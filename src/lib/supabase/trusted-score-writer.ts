@@ -3,6 +3,7 @@ import "server-only";
 import { createClient } from "@supabase/supabase-js";
 import { publicEnv } from "@/lib/env";
 import type { ScoreRecord } from "@/lib/scoring/explain";
+import type { WithNullable } from "@/lib/supabase/app-types";
 import type { Database, Json } from "@/lib/supabase/database.types";
 
 /**
@@ -21,7 +22,28 @@ import type { Database, Json } from "@/lib/supabase/database.types";
  * logged: failures are reported by error code only.
  */
 
-let client: ReturnType<typeof createClient<Database>> | null = null;
+/**
+ * The generated schema, except that save_lead_score_trusted accepts NULL for
+ * p_score and p_grade. `supabase gen types` reports every SQL function
+ * argument as non-null (PostgreSQL cannot declare argument nullability), but
+ * an excluded result is persisted with score NULL and grade NULL: the
+ * function and the lead_scores checks enforce that pairing, and the P1-E7
+ * database tests cover it. Only this module's private client uses this type;
+ * everything else in the generated schema is unchanged.
+ */
+type Functions = Database["public"]["Functions"];
+type SaveLeadScoreTrusted = Functions["save_lead_score_trusted"];
+type TrustedScoreDatabase = Omit<Database, "public"> & {
+  public: Omit<Database["public"], "Functions"> & {
+    Functions: Omit<Functions, "save_lead_score_trusted"> & {
+      save_lead_score_trusted: Omit<SaveLeadScoreTrusted, "Args"> & {
+        Args: WithNullable<SaveLeadScoreTrusted["Args"], "p_score" | "p_grade">;
+      };
+    };
+  };
+};
+
+let client: ReturnType<typeof createClient<TrustedScoreDatabase>> | null = null;
 
 function serviceRoleKey(): string | null {
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();
@@ -38,7 +60,7 @@ function writer() {
   if (!key) return null;
   // A publishable key here would silently fail every write; refuse it.
   if (key.startsWith("sb_publishable_")) return null;
-  client ??= createClient<Database>(publicEnv().NEXT_PUBLIC_SUPABASE_URL, key, {
+  client ??= createClient<TrustedScoreDatabase>(publicEnv().NEXT_PUBLIC_SUPABASE_URL, key, {
     auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
   });
   return client;

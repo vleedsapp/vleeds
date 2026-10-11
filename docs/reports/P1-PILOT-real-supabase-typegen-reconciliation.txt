@@ -1,0 +1,321 @@
+================================================================================
+VLEEDS — COMPLETION REPORT
+Story:   P1-PILOT — Real Supabase typegen reconciliation
+Date:    2026-10-11
+Status:  COMPLETE. Real local Supabase stack; generated DB types; full
+         quality gate green.
+
+  REAL SUPABASE:                         PASS
+  MIGRATIONS FROM CLEAN RESET:           PASS
+  REAL POSTGRES DB TESTS:                219 / 219
+  GENERATED DB TYPES:                    REPRODUCIBLE
+  TYPECHECK:                             PASS
+  FULL VERIFY:                           PASS (487 / 487 tests)
+  MANUAL EDITS REQUIRED AFTER DB:TYPES:  NO
+
+  Provider calls: NONE. No Google Places / Hunter configuration or calls.
+  No migration or SQL was changed.
+================================================================================
+
+CONTENTS
+  1. Real Supabase startup result
+  2. Migration reset result
+  3. Real PostgreSQL DB result
+  4. Why typegen initially broke TypeScript
+  5. Hand-maintained constructs discovered
+  6. App type aliases moved out
+  7. DAL reconciliation
+  8. RPC typing reconciliation
+  9. Trusted score writer nullable-result handling
+ 10. Files changed
+ 11. npm run db:types reproducibility check
+ 12. Typecheck result
+ 13. Full verify result
+ 14. Real DB rerun result
+ 15. Remaining pilot-readiness items
+
+
+--------------------------------------------------------------------------------
+1. REAL SUPABASE STARTUP RESULT
+--------------------------------------------------------------------------------
+Machine: macOS with Docker. `npx supabase start`: PASS.
+Postgres on 127.0.0.1:54322.
+
+
+--------------------------------------------------------------------------------
+2. MIGRATION RESET RESULT
+--------------------------------------------------------------------------------
+`npx supabase db reset`: PASS. All nine migrations applied in order on
+real Supabase Postgres:
+
+  20261007000000_tenancy_foundation
+  20261008000000_icp_configuration_foundation
+  20261009000000_lead_core_foundation
+  20261010000000_manual_csv_ingestion
+  20261011000000_company_discovery_foundation
+  20261012000000_company_enrichment_hunter
+  20261013000000_contact_discovery_hunter
+  20261014000000_icp_lead_scoring
+  20261015000000_today_contact_workflow
+
+
+--------------------------------------------------------------------------------
+3. REAL POSTGRESQL DB RESULT
+--------------------------------------------------------------------------------
+SUPABASE_TEST_DB_URL=postgresql://postgres:postgres@127.0.0.1:54322/postgres
+npm run test:db
+
+  Test Files  9 passed (9)
+       Tests  219 passed (219)
+
+tests/db/support/db.ts selects the `postgres` driver whenever
+SUPABASE_TEST_DB_URL is set, so this run used the real stack, not PGlite.
+This closes the migration/database-behaviour part of the PGlite-only
+blocker carried since P0-E1-S1 (P1-E7 U1, first half).
+
+
+--------------------------------------------------------------------------------
+4. WHY TYPEGEN INITIALLY BROKE TYPESCRIPT
+--------------------------------------------------------------------------------
+`npm run db:types` replaced the hand-maintained database.types.ts. Then
+typecheck failed with 22 errors in 8 files. Three causes:
+
+  a) The app imported a helper (MembershipRole) that only existed because
+     the file was hand-written.
+  b) `supabase gen types` cannot see SQL function nullability. PostgreSQL
+     has no syntax to declare that a function argument or a RETURNS TABLE
+     column is nullable, so the generator emits all of them as non-null.
+     Optional arguments (those with DEFAULT) become `p_x?: T`, not
+     `p_x?: T | null`. The hand-written file had encoded `| null`, and the
+     DAL passed `null` explicitly.
+  c) NOT NULL jsonb columns are generated as `NonNullable<Json>`. The DAL
+     widened plain arrays to `Json` with `as Json`, and that includes null.
+
+None of these is a database defect. The 219 real-Postgres tests prove the
+SQL behaviour, and no migration needed to change.
+
+
+--------------------------------------------------------------------------------
+5. HAND-MAINTAINED CONSTRUCTS DISCOVERED
+--------------------------------------------------------------------------------
+Method: both files were resolved with the TypeScript checker and every
+Tables.*.{Row,Insert,Update}, Functions.*.{Args,Returns} and Enums member
+was listed and diffed. The generated schema is treated as authoritative.
+
+  1. Application helper aliases
+     - MembershipRole ("owner" | "admin" | "member"), exported from the
+       generated file and used by Enums.membership_role and memberships.role.
+  2. Stale/mistyped generated schema
+     - None. Every table/column the old file declared exists in the
+       generated one with the same base type.
+  3. RPC argument assumptions (old `| null`, generated non-null)
+     - ingest_lead: p_import_row_id, p_enrichment_run_id
+     - list_companies: p_qualification, p_grade, p_restricted,
+       p_has_contact, p_country
+     - record_contact_attempt: p_note, p_source_task_id, p_next_kind,
+       p_next_due_at, p_next_note, p_suppression_scope, p_suppression_reason
+     - schedule_follow_up: p_note
+     - save_lead_score_trusted: p_score, p_grade (REQUIRED args; see §9)
+     All except save_lead_score_trusted are `DEFAULT NULL` in SQL.
+  4. Table Row/Insert/Update assumptions
+     - The old file listed only the Insert/Update columns the app wrote,
+       and used `never` for tables written only through functions
+       (contact_attempts, follow_up_tasks, lead_scores, organizations
+       Insert, lead_sources Update). The generated file lists every column.
+       That is a strict superset, so no app change was needed. Table GRANTs and
+       RLS remain the real write boundary (verified by the DB suite).
+  5. Enum assumptions
+     - membership_role is the only PostgreSQL enum. Its values are identical.
+       Other state columns are text + CHECK and are `string` in both files.
+  6. Nullable/non-null differences
+     - jsonb NOT NULL columns (workspaces.settings, import_batches.headers,
+       import_rows.raw_data, contact_discovery_runs.selected_titles):
+       old `Json`, generated `NonNullable<Json>`. The generated type is
+       more accurate.
+  7. Function-result assumptions (old nullable, generated non-null)
+     - list_companies: primary_domain, location, grade, score,
+       coverage_percent
+     - today_ready_candidates: location, coverage_percent, last_attempt
+     - today_due_tasks: note, job_title, phone
+     These did NOT cause compile errors, because the generated types are
+     narrower. But they are wrong: they can be NULL at runtime (each was checked against
+     the function body and its LEFT JOINs/nullable columns). They are now
+     re-widened outside the generated file (§6).
+
+
+--------------------------------------------------------------------------------
+6. APP TYPE ALIASES MOVED OUT
+--------------------------------------------------------------------------------
+New module: src/lib/supabase/app-types.ts. Everything is derived from
+`Database`, so a regeneration that renames or removes a column/function
+fails typecheck here rather than silently drifting.
+
+  MembershipRole          = Database["public"]["Enums"]["membership_role"]
+  WithNullable<T, K>      widens keys K of T to `| null`
+  ListCompaniesRow        list_companies row, 5 columns re-nullable
+  TodayReadyCandidateRow  today_ready_candidates row, 3 columns re-nullable
+  TodayDueTaskRow         today_due_tasks row, 3 columns re-nullable
+
+The module header documents the typegen limitation and the conventions.
+
+
+--------------------------------------------------------------------------------
+7. DAL RECONCILIATION
+--------------------------------------------------------------------------------
+No `any`, `@ts-ignore`, `@ts-expect-error` or new casts were added. Three
+`as Json` casts were removed.
+
+  workspaces.ts         MembershipRole now imported from app-types.
+  companies.ts          list_companies filters: `?? undefined` (omit when
+                        unset). Rows annotated ListCompaniesRow[]. Annotating
+                        is a widening assignment, not a cast. ingest_lead: no
+                        contact → omitted. p_import_row_id: null removed.
+  contacts.ts           ingest_lead: p_import_row_id: null removed.
+  enrichment.ts         ingest_lead: p_contact: null and p_import_row_id: null
+                        removed.
+  contact-workflow.ts   record_contact_attempt / schedule_follow_up optional
+                        args: `?? undefined` / optional chaining.
+  contact-discovery.ts  selected_titles: TargetTitle[] passed directly (it
+                        is JSON-compatible; the `as Json` cast was the only
+                        source of the null).
+  imports.ts            headers / raw_data: string[] passed directly.
+  today.ts              RPC results annotated TodayReadyCandidateRow[] /
+                        TodayDueTaskRow[].
+
+Why omitting matches sending null: every affected optional argument is
+declared `DEFAULT NULL` (verified in the migrations). supabase-js sends RPC
+args as a JSON body, where undefined keys are dropped. PostgREST then
+applies the SQL default, which is NULL. Each of these functions has exactly
+one overload, so omitting keys cannot select a different function. The
+UI-review mock treats missing and null alike (`== null`, `??`,
+truthiness).
+
+
+--------------------------------------------------------------------------------
+8. RPC TYPING RECONCILIATION
+--------------------------------------------------------------------------------
+Generated signatures audited against SQL and every call site:
+
+  save_lead_score_trusted   narrow overlay for p_score/p_grade (§9)
+  record_contact_attempt    matches generated; optional args omitted
+  schedule_follow_up        matches generated; p_note omitted when null
+  reschedule_follow_up      matches generated; no change
+  complete_follow_up        matches generated; no change
+  cancel_follow_up          matches generated; no change
+  ingest_lead               matches generated; NULL-default args omitted.
+                            p_evidence (DEFAULT '[]') is always passed.
+  commit_contact_candidate  matches generated; no change
+  list_companies            args match generated; result re-nullable
+  today_ready_candidates    args match generated; result re-nullable
+  today_due_tasks           args match generated; result re-nullable
+  scoring_input, stage_import_rows, create_organization
+                            match generated; no change
+
+Functions returning jsonb (ingest_lead, record_contact_attempt,
+commit_contact_candidate, scoring_input) were already narrowed by the DAL
+at the result. That is unchanged.
+
+
+--------------------------------------------------------------------------------
+9. TRUSTED SCORE WRITER NULLABLE-RESULT HANDLING
+--------------------------------------------------------------------------------
+save_lead_score_trusted takes p_score integer and p_grade text with no
+default. An EXCLUDED result is persisted with score NULL, grade NULL and
+exclusion reasons. The function and the lead_scores CHECKs enforce that
+pairing, and the P1-E7 DB tests (now on real Postgres) cover it. The
+generator reports both as `number` / `string`.
+
+Semantics are unchanged: there is no fake numeric score and no fake C grade.
+
+Boundary: src/lib/supabase/trusted-score-writer.ts types its PRIVATE
+service-role client with `TrustedScoreDatabase`. That type is the generated
+`Database` with one change: save_lead_score_trusted.Args has p_score and
+p_grade widened via WithNullable. It is built with Omit/intersection from
+the generated types, not cast, so:
+  - every other arg, the return type, and every other table/function stay
+    exactly as generated
+  - the client is never exported; the rest of the app keeps the plain
+    generated `Database`
+  - a probe confirmed the client still rejects missing args and wrong arg
+    types, and that the return type remains `string`
+The comment in the module explains why the boundary exists.
+
+
+--------------------------------------------------------------------------------
+10. FILES CHANGED
+--------------------------------------------------------------------------------
+  src/lib/supabase/database.types.ts      GENERATED (npm run db:types)
+  src/lib/supabase/app-types.ts           NEW app-facing derived types
+  src/lib/supabase/trusted-score-writer.ts  narrow RPC overlay (§9)
+  src/lib/dal/companies.ts
+  src/lib/dal/contact-discovery.ts
+  src/lib/dal/contact-workflow.ts
+  src/lib/dal/contacts.ts
+  src/lib/dal/enrichment.ts
+  src/lib/dal/imports.ts
+  src/lib/dal/today.ts
+  src/lib/dal/workspaces.ts
+  README.md                               "Database types" section; real-
+                                          stack verification note
+  docs/architecture/vleeds-tenancy.md     checklist step 8; DB driver note
+  docs/reports/P1-PILOT-real-supabase-typegen-reconciliation.txt (this)
+
+No migrations, SQL, tests, build artifacts or env files were changed.
+Historical completion reports were not edited.
+
+
+--------------------------------------------------------------------------------
+11. NPM RUN DB:TYPES REPRODUCIBILITY CHECK
+--------------------------------------------------------------------------------
+After all application fixes, `npm run db:types` was run again. The output
+is byte-identical to the committed file (cmp). No manual touch-up was
+needed. The CLI prints "Generated TypeScript is unformatted" (a hint only).
+The file is left exactly as generated, and lint passes on it.
+
+
+--------------------------------------------------------------------------------
+12. TYPECHECK RESULT
+--------------------------------------------------------------------------------
+npm run typecheck (next typegen && tsc --noEmit) after the second
+db:types: PASS, 0 errors (was 22 errors in 8 files).
+
+
+--------------------------------------------------------------------------------
+13. FULL VERIFY RESULT
+--------------------------------------------------------------------------------
+npm run verify: PASS
+  lint         PASS
+  typecheck    PASS
+  test         19 files, 487 / 487 passed (DB suites on PGlite here)
+  build        PASS
+  check:bundle OK: 28 client files scanned, no secrets / service-role keys /
+               server env names, no UI fixture code
+
+
+--------------------------------------------------------------------------------
+14. REAL DB RERUN RESULT
+--------------------------------------------------------------------------------
+After the reconciliation, with the stack still running:
+SUPABASE_TEST_DB_URL=postgresql://postgres:postgres@127.0.0.1:54322/postgres
+npm run test:db: 9 files, 219 / 219 passed.
+
+
+--------------------------------------------------------------------------------
+15. REMAINING PILOT-READINESS ITEMS
+--------------------------------------------------------------------------------
+  R1 Manual end-to-end check against the real stack with
+     SUPABASE_SERVICE_ROLE_KEY set: Evaluate fit, Refresh lead scores (incl.
+     one excluded company), one logged outcome. This is the second half of
+     P1-E7 U1. The DB suite proves the grants and function behaviour, but
+     the app → PostgREST → service-role path has not been exercised through
+     the browser on the real stack.
+  R2 Live provider smoke tests (Google Places, Hunter Domain Finder /
+     Company Enrichment / Domain Search). These need keys and separate
+     approval and were deliberately NOT started here.
+  R3 Carried from P1-E7: no axe/screen-reader pass (U7), no member
+     directory (U5), browser checks still run on the UI-review mock (U3).
+  R4 Optional: run `npm run db:types` in CI against a reset stack and fail
+     on diff, so a migration can never land without regenerated types.
+
+P1-E7 U6 ("database.types.ts is still hand-maintained") is CLOSED.
+================================================================================

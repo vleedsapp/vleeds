@@ -119,7 +119,7 @@ export async function createContactRun(
       provider_key: input.providerKey,
       domain: input.domain,
       status: "searching",
-      selected_titles: input.titles as Json,
+      selected_titles: input.titles,
       decision_maker_only: input.decisionMakerOnly,
       requested_limit: input.limit,
     })

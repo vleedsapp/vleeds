@@ -97,7 +97,7 @@ Authorization is enforced in the database. Application layers add UX and earlier
 
 A mutation run (8 deliberate breaks) made 8 tests fail.
 
-Drivers: **PGlite** (embedded Postgres + `tests/db/support/supabase-shim.sql`, which mirrors Supabase's roles, `auth.uid()` and default grants) runs anywhere; setting `SUPABASE_TEST_DB_URL` runs the identical suite against a real Supabase Postgres. A mutation run (leaky policy + RLS disabled) made 12 tests fail, confirming that the suite detects regressions.
+Drivers: **PGlite** (embedded Postgres + `tests/db/support/supabase-shim.sql`, which mirrors Supabase's roles, `auth.uid()` and default grants) runs anywhere; setting `SUPABASE_TEST_DB_URL` runs the identical suite against a real Supabase Postgres (first executed 2026-10-11 against the local stack after a clean `supabase db reset`: 9 files, 219/219 passed). A mutation run (leaky policy + RLS disabled) made 12 tests fail, confirming that the suite detects regressions.
 
 ## 8. Checklist: adding a tenant-owned table
 
@@ -108,7 +108,7 @@ Drivers: **PGlite** (embedded Postgres + `tests/db/support/supabase-shim.sql`, w
 5. `prevent_tenant_key_change('workspace_id', …)` trigger.
 6. Child rows reference parents with composite FKs `(workspace_id, parent_id) → parent(workspace_id, id)` so a row can never point into another workspace.
 7. Extend `tests/db` with cross-workspace and cross-org read/write attempts for the table.
-8. Regenerate `src/lib/supabase/database.types.ts`.
+8. Regenerate `src/lib/supabase/database.types.ts` with `npm run db:types` (generated; never edit it by hand; app aliases go in `src/lib/supabase/app-types.ts`).
 
 ## 9. Architecture decisions
 

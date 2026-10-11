@@ -135,7 +135,7 @@ export async function createImportBatch(workspaceId: string, filename: string, c
   const client = await supabase();
   const { data: batch, error } = await client
     .from("import_batches")
-    .insert({ workspace_id: workspaceId, filename: filename.slice(0, 255), headers: csv.headers as Json, total_rows: csv.rows.length })
+    .insert({ workspace_id: workspaceId, filename: filename.slice(0, 255), headers: csv.headers, total_rows: csv.rows.length })
     .select("id");
   if (error || !batch?.length) return { ok: false, reason: error ? failureFromDbError("createImportBatch", error) : "forbidden" };
   const batchId = batch[0].id;
@@ -145,7 +145,7 @@ export async function createImportBatch(workspaceId: string, filename: string, c
       workspace_id: workspaceId,
       import_batch_id: batchId,
       row_number: i + j + 1,
-      raw_data: rawCells(cells) as Json,
+      raw_data: rawCells(cells),
     }));
     const { error: rowError } = await client.from("import_rows").insert(chunk);
     if (rowError) {

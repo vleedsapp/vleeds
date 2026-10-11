@@ -392,9 +392,7 @@ export async function commitEnrichment(
   const { data, error } = await (await supabase()).rpc("ingest_lead", {
     p_workspace_id: workspaceId,
     p_company: call.company as Json,
-    p_contact: null,
     p_evidence: call.evidence as Json,
-    p_import_row_id: null,
     p_enrichment_run_id: runId,
     p_notes: notes as Json,
   });
