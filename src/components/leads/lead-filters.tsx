@@ -3,9 +3,8 @@
 import { SlidersHorizontal } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useMemo, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { buttonClass, cx } from "@/components/ui/primitives";
-import { countryOptions } from "@/lib/config/countries";
 import { QUALIFICATION_LABEL } from "@/lib/lead-core/display";
 import { hasActiveFilters, leadQueryString, type LeadListQuery } from "@/lib/lead-core/list-query";
 import { QUALIFICATION_STATES } from "@/lib/lead-core/schemas";
@@ -14,12 +13,23 @@ import { QUALIFICATION_STATES } from "@/lib/lead-core/schemas";
  * Basic Leads filters and sort. A plain GET form (works without JavaScript);
  * with JavaScript it applies on change. The URL is the source of truth, so
  * filtered views are shareable and the company drawer keeps working.
+ *
+ * `countries` comes from the server: names are runtime ICU data, and browsers
+ * name some regions differently from Node (e.g. HK, MO, PS, FK), which made
+ * the server-rendered options fail hydration.
  */
-export function LeadFilters({ basePath, query }: { basePath: string; query: LeadListQuery }) {
+export function LeadFilters({
+  basePath,
+  query,
+  countries,
+}: {
+  basePath: string;
+  query: LeadListQuery;
+  countries: { code: string; name: string }[];
+}) {
   const router = useRouter();
   const form = useRef<HTMLFormElement>(null);
   const [open, setOpen] = useState(hasActiveFilters(query));
-  const countries = useMemo(() => countryOptions(), []);
   const active = hasActiveFilters(query);
 
   const apply = () => {

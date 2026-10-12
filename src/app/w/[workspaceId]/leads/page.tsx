@@ -8,6 +8,7 @@ import { LeadFilters } from "@/components/leads/lead-filters";
 import { Pagination } from "@/components/leads/pagination";
 import { EmptyState } from "@/components/ui/empty-state";
 import { buttonClass, cx, Panel, PageHeader } from "@/components/ui/primitives";
+import { countryOptions } from "@/lib/config/countries";
 import { canConfigureWorkspace, companyWorkflow, getCompanyDetail, getWorkspace, latestContactRun, listCompanies, listIcpProfilesForDiscovery } from "@/lib/dal";
 import { hasActiveFilters, leadQueryString, parseLeadQuery } from "@/lib/lead-core/list-query";
 import { isUuid, workspacePath } from "@/lib/navigation";
@@ -84,7 +85,7 @@ export default async function LeadsPage({ params, searchParams }: PageProps<"/w/
             </EmptyState>
           ) : (
             <>
-              <LeadFilters key={leadQueryString(query)} basePath={base} query={query} />
+              <LeadFilters key={leadQueryString(query)} basePath={base} query={query} countries={countryOptions()} />
               {list.items.length === 0 ? (
                 <div className="px-6 py-12 text-center">
                   <p className="text-[16px] font-semibold text-ink">{filtered ? "No companies match these filters" : "This page is empty"}</p>

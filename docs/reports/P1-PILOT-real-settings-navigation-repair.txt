@@ -1,0 +1,308 @@
+================================================================================
+VLEEDS — COMPLETION REPORT
+Story:   P1-PILOT — Real-stack Settings / authorization / navigation repair
+Date:    2026-10-11
+Status:  COMPLETE. Verified on the real local Supabase stack under `next dev`.
+
+  LOCAL PILOT USER ROLE:       owner (unchanged; it was already owner)
+  BUSINESS PROFILE EDIT:       PASS
+  ICP CONFIGURATION:           PASS
+  MEMBER READ-ONLY:            PASS
+  NEXT.JS NAVIGATION WARNING:  RESOLVED
+  SESSION / AUTH REGRESSION:   PASS
+  REAL POSTGRES TESTS:         223 / 223
+  FULL VERIFY:                 500 / 500
+
+  No authorization rule, RLS policy, grant, migration or membership was
+  changed. Provider calls: NONE (Google/Hunter not configured or called).
+================================================================================
+
+CONTENTS
+  1. Root cause of read-only Settings
+  2. Local user's actual role before repair
+  3. Membership/fixture change
+  4. Why production authorization was not weakened
+  5. Root cause of Next.js uncached-data warning
+  6. Exact navigation/cache fix
+  7. Business Profile real-stack verification
+  8. ICP real-stack verification
+  9. Owner/admin/member permission verification
+ 10. Real browser navigation verification
+ 11. Tests
+ 12. Full verify result
+ 13. Real Postgres result
+ 14. Remaining pilot-readiness items
+
+
+--------------------------------------------------------------------------------
+1. ROOT CAUSE OF READ-ONLY SETTINGS
+--------------------------------------------------------------------------------
+The cause was NOT role, membership, RLS or server-action authorization. It
+was a dev-only client bug in the shared editing sheet
+(src/components/settings/config-sheet.tsx).
+
+Diagnosis, in order:
+  - DB: pilot@vleeds.test is `owner` of org "Chelly", which owns
+    "Chelth Test". The pilot created both through the normal onboarding page.
+  - UI: Settings showed "Your role: Owner". The Edit button and all six
+    ICP "(edit)" rows were rendered and hydrated.
+  - "Not configured" was truthful: Chelth Test had 0 icp_profiles rows.
+  - Clicking Edit opened nothing. On the component's fiber, the state DID
+    flip to open=true, then went back to false.
+  - The same flow on a production build (`next start`) worked.
+
+Mechanism: ConfigSheet opens its native <dialog> in a mount effect
+(showModal) and closes it in the cleanup (close()). It also forwards the
+dialog's `close` event to onClose. React Strict Mode (development only)
+runs mount → cleanup → mount. The cleanup's close() QUEUES a `close`
+event. The second mount re-opens the dialog. Then the queued event fires,
+onClose runs, and the parent unmounts the sheet in the same instant it
+opened. Every sheet built on ConfigSheet was affected in `next dev`:
+business profile, all six ICP editors, add-contact, the contact workflow
+sheets, the import decision sheet and the fit sheet. Earlier browser reviews ran on
+`next start` (production), so this never surfaced before. The pilot is the
+first run under `next dev` on the real stack.
+
+
+--------------------------------------------------------------------------------
+2. LOCAL USER'S ACTUAL ROLE BEFORE REPAIR
+--------------------------------------------------------------------------------
+owner. memberships(organization "Chelly", pilot@vleeds.test, role owner),
+created 2026-10-11 20:09 UTC by public.create_organization during the
+product's onboarding. The Settings page displayed "Your role: Owner".
+
+
+--------------------------------------------------------------------------------
+3. MEMBERSHIP/FIXTURE CHANGE
+--------------------------------------------------------------------------------
+No change was needed. The membership was already correct. The local
+test-user helper (scripts/dev/create-local-test-user.mjs) is unchanged.
+It only creates the Auth user. Onboarding then correctly makes the creator
+the owner, and a new DB test now covers that path (§11).
+
+Local data written during verification:
+  - Chelth Test: a generic "Pilot test ICP" saved through the real UI. It
+    has a description, industry "Healthcare", 10–500 employees, a US
+    country target, one role "Operations Manager", one signal "Hiring"
+    (weight 50), explicit "no exclusions", and the suggested scoring
+    defaults (A ≥ 75, B ≥ 50). These are placeholders to replace with real
+    targeting. Website was set to https://example.com, verified after
+    reload, then restored to empty.
+  - Alpha Workspace (seed fixture): the seeded Settings walkthrough
+    configured its ICP. One generic company, "Example Drawer Test Co", was
+    added through public.ingest_lead as owner.a (publishable key, RLS) for
+    the drawer check. The permission-matrix test edits were restored, and
+    its two test ICP rows were deleted.
+
+
+--------------------------------------------------------------------------------
+4. WHY PRODUCTION AUTHORIZATION WAS NOT WEAKENED
+--------------------------------------------------------------------------------
+  - No change to RLS policies, grants, private.has_org_role,
+    canConfigureWorkspace, the settings server actions, or any migration.
+  - The ConfigSheet fix only changes WHEN a native `close` event counts as
+    "the browser closed the dialog": only if the dialog is actually closed
+    at that moment. Read-only sheets for members are unchanged.
+  - Owner/admin/member behaviour was re-verified on the real stack (§9).
+
+
+--------------------------------------------------------------------------------
+5. ROOT CAUSE OF NEXT.JS UNCACHED-DATA WARNING
+--------------------------------------------------------------------------------
+Next.js 16.4 with cacheComponents validates instant navigation in dev
+(validationLevel 'warning' by default). It simulates both the page load
+and client navigation into each page segment.
+
+createSupabaseServerClient() calls `await connection()` (and cookies()).
+That is correct and stays: the session is per-request, and without it
+supabase-js reads the clock during App Shell prerendering. It is reached
+from every workspace page (SectionPage → getWorkspace, and the Discover,
+Leads and Import pages directly).
+
+The only <Suspense> covering those pages was src/app/w/[workspaceId]/
+loading.tsx. For a client navigation between sibling sections (Today →
+Settings), the [workspaceId] layout and that boundary are ALREADY MOUNTED,
+so it doesn't cover the new page segment. The navigation blocks on
+connection(), and dev reported:
+  Route "/w/[workspaceId]/<section>": Next.js encountered uncached data
+  during prerendering or a navigation.
+It affected every workspace section: today, discover, leads, campaigns,
+settings and leads/import, not only Settings. (Source:
+next/dist/server/app-render/blocking-route-messages.js,
+createDynamicBodyErrorInNavigation.)
+
+This was a separate issue from §1. Fixing it alone did not make the sheets
+open. Both fixes were needed.
+
+
+--------------------------------------------------------------------------------
+6. EXACT NAVIGATION/CACHE FIX
+--------------------------------------------------------------------------------
+The [stream] fix from the Next.js docs (instant-navigation guide,
+loading.js: "loading.js wraps page.js … in a <Suspense> boundary"):
+  each page segment gets its own loading.tsx, which re-exports the existing
+  workspace PageSkeleton (no new design).
+    src/app/w/[workspaceId]/{today,discover,leads,campaigns,settings}/loading.tsx
+    src/app/w/[workspaceId]/leads/import/loading.tsx
+    src/app/w/[workspaceId]/leads/import/[batchId]/loading.tsx
+Not used:
+  - force-dynamic
+  - `instant = false`
+  - suppressing validation
+  - removing connection()
+  - any cache directive
+Caching behaviour is unchanged. The App Shell now renders immediately on
+navigation, and the authenticated content streams in.
+
+Also fixed (found by the new browser check, pre-existing): a hydration
+mismatch on Leads. LeadFilters (client) built its country list from the
+runtime's Intl.DisplayNames. Chrome's ICU names FK, HK, MO and PS
+differently from Node's (e.g. "Hong Kong" vs "Hong Kong SAR China"), so
+the server-rendered <option>s failed hydration. The Leads page (server)
+now computes countryOptions() once and passes it in. Other countryOptions
+users render only after a user action (inside sheets), so they are not
+affected.
+
+ConfigSheet fix (§1): onClose fires only when the dialog is still closed
+when the queued `close` event arrives.
+
+Files changed:
+  src/components/settings/config-sheet.tsx       close-event guard
+  src/app/w/[workspaceId]/**/loading.tsx         7 new per-segment boundaries
+  src/components/leads/lead-filters.tsx          countries via props
+  src/app/w/[workspaceId]/leads/page.tsx         passes countryOptions()
+  tests/db/tenancy.test.ts                       +4 DB tests
+  tests/unit/navigation-boundaries.test.ts       NEW (9 tests)
+  scripts/ui-review/review-dev-navigation.mjs    NEW real-stack dev check
+  README.md                                      check documented
+  docs/reports/P1-PILOT-real-settings-navigation-repair.txt (this)
+
+
+--------------------------------------------------------------------------------
+7. BUSINESS PROFILE REAL-STACK VERIFICATION
+--------------------------------------------------------------------------------
+pilot@vleeds.test → Chelth Test → Settings → Edit, under `next dev`:
+  - Website set to https://example.com → Save → sheet closed
+  - full reload → "https://example.com" shown (persisted)
+  - restored to empty → reload → "Not set"
+  - no console errors
+The seeded walkthrough (scripts/ui-review/review-settings.mjs, owner.a on
+Alpha, `next dev`, real stack) also passed every business-profile check,
+including validation, focus return and dirty-close protection.
+
+
+--------------------------------------------------------------------------------
+8. ICP REAL-STACK VERIFICATION
+--------------------------------------------------------------------------------
+pilot@vleeds.test on Chelth Test, real browser: saved Ideal customer
+profile, Target geographies, Decision-maker titles, Buying signals,
+Exclusion signals and Scoring rules. After a full reload all six show
+Configured / No exclusions. DB check: one default profile, one entry per
+list (no duplicates), thresholds {a: 75, b: 50}.
+Probe: 13/13 checks.
+review-settings.mjs on Alpha under `next dev`: 66/66 (all six sections,
+validation, persistence after reload, mobile sheets, keyboard/focus, no
+direct browser→Supabase calls).
+
+
+--------------------------------------------------------------------------------
+9. OWNER/ADMIN/MEMBER PERMISSION VERIFICATION
+--------------------------------------------------------------------------------
+Real PostgREST API with the publishable key and each user's own session
+(RLS decides), on Alpha:
+  owner  (owner.a)   read profile ✓  update profile 1 row ✓  read ICP ✓
+                     update ICP 1 row ✓  create ICP ✓
+  admin  (multi)     same as owner ✓
+  member (member.a)  read profile ✓  update profile 0 rows ✓  read ICP ✓
+                     update ICP 0 rows ✓  create ICP 42501 ✓
+  15/15. Successful edits were restored.
+Browser: the member sees no business-profile Edit, and the ICP sheets open
+read-only with no Save ("Only owners and admins can change this."). The
+admin gets editable sheets (review-settings.mjs). The server actions still
+re-check role (canConfigureWorkspace) before writing, and RLS checks again.
+
+
+--------------------------------------------------------------------------------
+10. REAL BROWSER NAVIGATION VERIFICATION
+--------------------------------------------------------------------------------
+scripts/ui-review/review-dev-navigation.mjs, under `next dev` on the real
+stack:
+  pilot / Chelth Test   25/25 (company drawer skipped: no companies yet)
+  owner.a / Alpha       29/29
+Covered:
+  - sign-in and session cookie
+  - two rounds of client-side navigation Today → Discover → Leads →
+    Campaigns → Settings → Today, with zero console errors (no
+    uncached-data validation error)
+  - refresh on Settings stays signed in
+  - every Settings sheet opens AND stays open
+  - workspace switcher (Alpha → Beta)
+  - company drawer via ?company= and after refresh
+  - Leads with no hydration error
+  - sign-out → /login
+  - signed out, /w/<id>/settings → /login?next=…
+Also clean: /login, / (signed out → /login; signed in → workspace
+Today), the login submit, and /workspaces/new.
+Before the fix: every workspace page logged the validation error, and no
+Settings sheet could be opened in dev.
+
+
+--------------------------------------------------------------------------------
+11. TESTS
+--------------------------------------------------------------------------------
+New, in CI via `npm run verify`:
+  tests/unit/navigation-boundaries.test.ts (9). Every page segment under
+    /w/[workspaceId] has its own loading.tsx. Verified that it fails when
+    settings/loading.tsx is removed.
+  tests/db/tenancy.test.ts "settings writes by role" (4):
+    - owner can update every business-profile field
+    - admin can update every business-profile field
+    - member can read but not change it (0 rows, unchanged)
+    - onboarding (create_organization + the app's workspace insert) yields
+      an owner who can update the profile and timezone and create/update
+      an ICP profile
+  ICP owner/admin/member write rules were already covered by
+  tests/db/icp-profiles.test.ts.
+New browser check (repo convention, needs a dev server + stack):
+  scripts/ui-review/review-dev-navigation.mjs. It reads credentials from the
+  environment, refuses non-local BASE_URLs, and catches both dev-only
+  regressions (navigation validation, and sheets dismissed by Strict Mode).
+No client-secret leakage: check:bundle OK (28 client files, 3 secret
+values checked). The browser never calls Supabase directly
+(review-settings.mjs).
+Not added: a component-level unit test for ConfigSheet. The repo has no
+DOM test environment, and adding jsdom/Testing Library would be new
+dependencies. The browser check covers it on the real runtime instead.
+
+
+--------------------------------------------------------------------------------
+12. FULL VERIFY RESULT
+--------------------------------------------------------------------------------
+npm run typecheck: PASS
+npm run verify:    PASS. lint, typecheck, 20 files / 500 tests (487
+                   baseline + 9 + 4), build, check:bundle OK.
+
+
+--------------------------------------------------------------------------------
+13. REAL POSTGRES RESULT
+--------------------------------------------------------------------------------
+SUPABASE_TEST_DB_URL=postgresql://postgres:postgres@127.0.0.1:54322/postgres
+npm run test:db: 9 files, 223 / 223 (219 + 4 new).
+
+
+--------------------------------------------------------------------------------
+14. REMAINING PILOT-READINESS ITEMS
+--------------------------------------------------------------------------------
+  R1 Replace the placeholder "Pilot test ICP" on Chelth Test with real
+     targeting.
+  R2 Manual end-to-end check on the real stack: add or import companies,
+     Evaluate fit, Refresh lead scores (including one excluded company),
+     and log one outcome. The trusted score writer key is set locally;
+     restart `next dev` if it was started before the key was added.
+  R3 Live provider smoke tests (Google Places, Hunter). These need keys
+     and separate approval.
+  R4 Hosted project auth settings check (from the local-auth report).
+  R5 Carried: axe/screen-reader pass, member directory, CI check for
+     db:types drift. Optionally run review-dev-navigation.mjs in CI against
+     a dev server + stack.
+================================================================================

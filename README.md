@@ -25,6 +25,16 @@ cp .env.example .env.local  # then paste the "Publishable key" from `npx supabas
 npm run dev                 # http://localhost:3000
 ```
 
+Email/password sign-in works for existing users while public signup stays disabled. In `supabase/config.toml`, `[auth] enable_signup = false` blocks self-service signup. `[auth.email] enable_signup` must stay `true`: despite its name, it switches the email provider itself on or off (`GOTRUE_EXTERNAL_EMAIL_ENABLED`).
+
+Local development login (not seeded, starts with no workspace, so it goes through onboarding): add `SUPABASE_SERVICE_ROLE_KEY` (from `npx supabase status`), `VLEEDS_LOCAL_TEST_EMAIL` and `VLEEDS_LOCAL_TEST_PASSWORD` (≥ 12 chars) to `.env.local`, then:
+
+```bash
+node --env-file=.env.local scripts/dev/create-local-test-user.mjs
+```
+
+The script uses the Auth Admin API, is idempotent, refuses any non-loopback Supabase URL, and finishes by signing in with the publishable key.
+
 Seeded users (password `vleeds-dev-password`, local only):
 
 | Email | Access |
@@ -66,6 +76,10 @@ The canonical UI references in `docs/design/canonical/` are authoritative. Token
 ### Development-only UI fixtures
 
 `/ui-fixtures/today` renders the populated lead table and detail drawer from invented data so the canonical design can be reviewed before the lead domain exists. The route exists only in builds made with `VLEEDS_UI_FIXTURES=1` (it uses the `page.fixture.tsx` extension). It is refused for Vercel production, and `npm run check:bundle` fails if fixture code appears in a normal build.
+
+### Real-stack dev navigation check
+
+`scripts/ui-review/review-dev-navigation.mjs` runs against `npm run dev` and the real local stack (credentials from `.env.local`). It checks client-side navigation through every workspace section with no Next.js instant-navigation errors, checks that every Settings sheet opens and stays open, and covers refresh, the workspace switcher, the company drawer, sign-out and the signed-out redirect. Every page segment under `src/app/w/[workspaceId]` needs its own `loading.tsx`; `tests/unit/navigation-boundaries.test.ts` enforces this.
 
 ### UI review without Docker
 

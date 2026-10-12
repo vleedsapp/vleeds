@@ -463,6 +463,72 @@ describe("organization creation", () => {
 });
 
 // -----------------------------------------------------------------------------
+// Settings writes by role (P1-PILOT real-stack repair). The pilot account
+// reached Settings as an owner but couldn't edit; the cause was client-side
+// (see docs/reports/P1-PILOT-real-settings-navigation-repair.txt), and these
+// pin the database half of the contract: owners/admins write the business
+// profile and ICP, members can't, and onboarding yields a configurable owner.
+describe("settings writes by role", () => {
+  const PROFILE_UPDATE =
+    "update public.workspaces set name = $2, primary_domain = $3, website_url = $4, description = $5 where id = $1";
+
+  it.each(["ownerA", "adminA"] as const)("%s can update every business-profile field", async (who) => {
+    await as(db, user(f.users[who]), async (s) => {
+      const r = await s.attempt(PROFILE_UPDATE, [f.workspaces.a1, "Renamed", "renamed.example.test", "https://renamed.example.test", "Updated."]);
+      expect(r.ok && r.affectedRows).toBe(1);
+      expect(await s.query("select name, website_url from public.workspaces where id = $1", [f.workspaces.a1])).toEqual([
+        { name: "Renamed", website_url: "https://renamed.example.test" },
+      ]);
+    });
+  });
+
+  it("a member can read the business profile but cannot change it", async () => {
+    await as(db, user(f.users.memberA), async (s) => {
+      expect(await s.query("select name from public.workspaces where id = $1", [f.workspaces.a1])).toHaveLength(1);
+      const r = await s.attempt(PROFILE_UPDATE, [f.workspaces.a1, "nope", "nope.example.test", "https://nope.example.test", "nope"]);
+      expect(r.ok && r.affectedRows).toBe(0);
+    });
+    const [ws] = await ownerView<{ name: string; website_url: string | null }>("select name, website_url from public.workspaces where id = $1", [
+      f.workspaces.a1,
+    ]);
+    expect(ws).toMatchObject({ name: "Workspace A1" });
+    expect(ws.website_url).not.toBe("https://nope.example.test");
+  });
+
+  it("onboarding (create_organization + workspace insert) yields an owner who can configure Settings", async () => {
+    await as(db, user(f.users.outsider), async (s) => {
+      const [{ id: org }] = await s.query<{ id: string }>("select public.create_organization($1, $2) as id", ["Pilot Org", `pilot-org-${f.tag}`]);
+      // Same insert as src/app/workspaces/new/actions.ts.
+      const [{ id: ws }] = await s.query<{ id: string }>(
+        "insert into public.workspaces (organization_id, name, slug, description) values ($1, 'Pilot Workspace', 'pilot-workspace', 'Generic.') returning id",
+        [org],
+      );
+      expect(await s.query("select role from public.memberships where organization_id = $1 and user_id = $2", [org, f.users.outsider])).toEqual([
+        { role: "owner" },
+      ]);
+
+      const profile = await s.attempt(PROFILE_UPDATE, [ws, "Pilot Workspace", "pilot.example.test", "https://pilot.example.test", "Generic."]);
+      expect(profile.ok && profile.affectedRows).toBe(1);
+      const tz = await s.attempt("update public.workspaces set timezone = 'Europe/London' where id = $1", [ws]);
+      expect(tz.ok && tz.affectedRows).toBe(1);
+
+      const icp = await s.attempt<{ id: string }>(
+        "insert into public.icp_profiles (workspace_id, name, is_default) values ($1, 'Pilot ICP', true) returning id",
+        [ws],
+      );
+      expect(icp.ok).toBe(true);
+      if (!icp.ok) return;
+      const upd = await s.attempt(
+        `update public.icp_profiles set ideal_customer = '{"industries":["Example"],"characteristics":[],"keywords":[],"companySize":{"minEmployees":10,"maxEmployees":500},"notes":null}'::jsonb
+          where id = $1`,
+        [icp.rows[0].id],
+      );
+      expect(upd.ok && upd.affectedRows).toBe(1);
+    });
+  });
+});
+
+// -----------------------------------------------------------------------------
 describe("service role", () => {
   it("bypasses RLS (server-only; must never reach the browser)", async () => {
     await as(db, { kind: "service" }, async (s) => {

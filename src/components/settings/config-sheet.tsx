@@ -107,8 +107,14 @@ export function ConfigSheet({
       onClick={(e) => {
         if (e.target === dialogRef.current) requestClose();
       }}
-      // If the browser closes the dialog itself, keep React state in sync.
-      onClose={onClose}
+      // If the browser closes the dialog itself, keep React state in sync. The
+      // `close` event is queued, so it can arrive after the dialog was already
+      // re-opened: React Strict Mode (dev) runs the mount effect's cleanup and
+      // then mounts again, and the cleanup's close() would otherwise dismiss
+      // the sheet the moment it opens. Only a dialog that is still closed counts.
+      onClose={() => {
+        if (!dialogRef.current?.open) onClose();
+      }}
       className={cx(
         "fixed inset-x-0 bottom-0 top-auto m-0 h-[92dvh] max-h-none w-full max-w-none overflow-hidden rounded-t-2xl border-t border-line bg-surface p-0 text-ink shadow-pop backdrop:bg-ink/25 sm:inset-y-0 sm:left-auto sm:right-0 sm:h-dvh sm:rounded-none sm:rounded-l-2xl sm:border-l sm:border-t-0 sm:shadow-drawer",
         wide ? "sm:w-[min(1040px,100vw)]" : "sm:w-[min(560px,100vw)]",

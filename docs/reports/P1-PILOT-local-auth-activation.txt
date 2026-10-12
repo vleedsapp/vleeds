@@ -1,0 +1,222 @@
+================================================================================
+VLEEDS — COMPLETION REPORT
+Story:   P1-PILOT — Local Supabase auth activation + test login
+Date:    2026-10-11
+Status:  COMPLETE. Local development only.
+
+  LOCAL AUTH:               PASS
+  EMAIL/PASSWORD PROVIDER:  ENABLED
+  PUBLIC SELF-SIGNUP:       DISABLED (verified: 422 signup_disabled)
+  TEST USER CREATED:        YES (pilot@vleeds.test, via Auth Admin API)
+  DIRECT PASSWORD LOGIN:    PASS
+  VLEEDS BROWSER LOGIN:     PASS (lands on onboarding)
+  REAL POSTGRES TESTS:      219 / 219
+  FULL VERIFY:              487 / 487
+
+  The test password is stored only in the git-ignored .env.local. It is
+  not in this report or in any tracked file.
+  Provider calls: NONE. Google Places / Hunter were not configured.
+================================================================================
+
+CONTENTS
+  1. Root cause
+  2. Exact local Auth config change
+  3. Why public signup remains disabled
+  4. Test-user creation method
+  5. Direct Auth verification
+  6. Vleeds browser login verification
+  7. Workspace/onboarding result
+  8. Production-safety checks
+  9. Test results
+ 10. Remaining pilot-readiness items
+
+
+--------------------------------------------------------------------------------
+1. ROOT CAUSE
+--------------------------------------------------------------------------------
+supabase/config.toml has two keys named `enable_signup` that do different
+things. The running Auth container's environment showed the mapping (CLI
+2.120.0):
+
+  [auth]       enable_signup = false  ->  GOTRUE_DISABLE_SIGNUP=true
+  [auth.email] enable_signup = false  ->  GOTRUE_EXTERNAL_EMAIL_ENABLED=false
+
+The second key, despite its comment ("Allow/disallow new user signups via
+email"), turns off the email provider entirely. So EVERY password sign-in
+was rejected: 422 email_provider_disabled, "Email logins are disabled".
+That included the seeded users and any admin-created user. The app
+reported the 422 as "Sign-in is unavailable right now". Both keys were
+set to false in P0-E1-S1, intended as "invitation only". Before Docker
+was available, only the UI-review mock had exercised sign-in, so the
+problem never surfaced.
+
+The earlier "Password should be at least 12 characters" error was not a
+bug. It is the intended policy (`minimum_password_length = 12`), which
+was not changed.
+
+
+--------------------------------------------------------------------------------
+2. EXACT LOCAL AUTH CONFIG CHANGE
+--------------------------------------------------------------------------------
+supabase/config.toml, [auth.email] only:
+
+  - enable_signup = false
+  + enable_signup = true      (with a comment explaining the mapping)
+
+Nothing else changed. [auth] enable_signup = false, minimum_password_length
+= 12, enable_anonymous_sign_ins = false, [auth.sms] and all providers are
+unchanged. [auth.email] enable_confirmations is still false
+(GOTRUE_MAILER_AUTOCONFIRM=true), so local email confirmation does not
+block the dev user. The helper also creates the user already confirmed.
+
+Restart: `npx supabase stop` then `npx supabase start`. The CLI restored
+the database from its backup volume. There was NO `db reset`, and existing
+local users and organizations were preserved. After the restart, the Auth
+container had GOTRUE_EXTERNAL_EMAIL_ENABLED=true and
+GOTRUE_DISABLE_SIGNUP=true. All 11 containers were up, and every one with
+a healthcheck reported healthy. GET /auth/v1/settings: external.email =
+true, disable_signup = true.
+
+
+--------------------------------------------------------------------------------
+3. WHY PUBLIC SIGNUP REMAINS DISABLED
+--------------------------------------------------------------------------------
+"Provider enabled" (users with a password can sign in) is separate from
+"signup allowed" (anyone can create an account). Signup is controlled by
+GOTRUE_DISABLE_SIGNUP=true, which comes from [auth] enable_signup = false
+and was not touched.
+
+Verified: POST /auth/v1/signup with the publishable key returned
+  {"code":422,"error_code":"signup_disabled","msg":"Signups not allowed for this instance"}
+and no auth.users row was created. The app has no signup UI or
+supabase.auth.signUp call (src/ only calls signInWithPassword). Accounts
+are still created only by an admin (Admin API / Studio / seed).
+
+
+--------------------------------------------------------------------------------
+4. TEST-USER CREATION METHOD
+--------------------------------------------------------------------------------
+New script: scripts/dev/create-local-test-user.mjs
+  node --env-file=.env.local scripts/dev/create-local-test-user.mjs
+
+  - Uses the supported Auth Admin API (supabase-js auth.admin: listUsers,
+    createUser / updateUserById). No SQL into auth.users/auth.identities.
+  - Refuses to run unless NEXT_PUBLIC_SUPABASE_URL is http:// on a loopback
+    host (127.0.0.1, localhost, ::1). It also refuses NODE_ENV/VERCEL_ENV
+    production. Verified: https://<ref>.supabase.co and http://10.0.0.5:54321
+    are refused with exit 1.
+  - Idempotent. A second run found the user (same id), re-synced the
+    password from .env.local and kept the email confirmed.
+  - Creates the user with email_confirm: true.
+  - Prints only the email and user id, never keys, passwords or tokens.
+  - Reads credentials only from the environment (.env.local).
+
+.env.local (git-ignored) received:
+  SUPABASE_SERVICE_ROLE_KEY   the LOCAL stack's key (from `supabase status`).
+                              It also enables the P1-E7 trusted score writer
+                              locally.
+  VLEEDS_LOCAL_TEST_EMAIL     pilot@vleeds.test (.test is accepted by Auth)
+  VLEEDS_LOCAL_TEST_PASSWORD  24 random alphanumeric characters
+.env.example lists the two VLEEDS_LOCAL_TEST_* names with empty values.
+
+
+--------------------------------------------------------------------------------
+5. DIRECT AUTH VERIFICATION
+--------------------------------------------------------------------------------
+The script's final step signs in with a separate client built from the
+PUBLISHABLE key only (no service-role credential), using
+signInWithPassword:
+  - authentication succeeded
+  - a session with an access token was returned (not printed)
+  - the returned user id matched the created user
+The seeded owner.a@example.test also signs in now with the documented
+local seed password. The same provider switch had blocked it.
+
+
+--------------------------------------------------------------------------------
+6. VLEEDS BROWSER LOGIN VERIFICATION
+--------------------------------------------------------------------------------
+Headless Chrome (puppeteer-core, the repo's UI-review driver, installed
+--no-save) against the running `next dev` on localhost:3000 and the real
+local stack:
+  - GET /login: 200, the login form rendered
+  - submitted pilot@vleeds.test + password
+  - redirected to /workspaces/new (left /login)
+  - no "Sign-in is unavailable right now" or "Incorrect email or password"
+  - Supabase SSR auth cookie set (sb-127-auth-token, SameSite=Lax). It is
+    not HttpOnly, which is the @supabase/ssr default and unchanged here.
+  - page footer: "Signed in as pilot@vleeds.test"
+
+
+--------------------------------------------------------------------------------
+7. WORKSPACE/ONBOARDING RESULT
+--------------------------------------------------------------------------------
+The new user has 0 memberships, so resolveHomePath sends them to the
+product's onboarding page, "Set up your first workspace" (organization
+name, workspace name, optional domain/website/description). That page
+creates the organization through public.create_organization, with the
+user as owner. Vleeds does not require an invitation before login.
+No membership, organization or workspace was fabricated. The pilot user
+completes onboarding through the real flow.
+
+
+--------------------------------------------------------------------------------
+8. PRODUCTION-SAFETY CHECKS
+--------------------------------------------------------------------------------
+  - No signup UI or signUp call was added.
+  - config.toml is the LOCAL stack's config. The change re-enables the email
+    provider, which hosted Supabase projects have on by default. Signup
+    remains disabled. Hosted settings are managed separately and were not
+    touched (no `supabase config push`).
+  - Password policy (12 chars) is unchanged.
+  - The test password and the service-role key are not in any tracked file
+    (git grep) and not in any new or changed worktree file. The
+    service-role value also appears in supabase/.temp/start-secrets, the
+    CLI's own git-ignored runtime file.
+  - .env.local is git-ignored (.gitignore: .env*).
+  - The helper refuses production and non-loopback URLs (§4).
+  - The service-role key is used only by the local helper script (Node,
+    never bundled) and by the existing server-only trusted score writer.
+  - NEXT_PUBLIC_ variables in .env.local: SUPABASE_URL and
+    SUPABASE_PUBLISHABLE_KEY only.
+  - check:bundle scanned 3 secret env values (including the new password
+    and the service-role key): none are in the client bundle.
+  - package.json / package-lock.json are unchanged (puppeteer-core is --no-save).
+
+
+--------------------------------------------------------------------------------
+9. TEST RESULTS
+--------------------------------------------------------------------------------
+  npm run verify   PASS: lint, typecheck, 487 / 487 tests, build,
+                   check:bundle OK
+  npm run test:db  with SUPABASE_TEST_DB_URL=postgresql://postgres:postgres@
+                   127.0.0.1:54322/postgres: 9 files, 219 / 219 on real
+                   Postgres. The pilot user was intact afterwards (the suite
+                   rolls back).
+
+Files changed:
+  supabase/config.toml                        [auth.email] enable_signup
+  scripts/dev/create-local-test-user.mjs      NEW
+  README.md                                   auth note + helper usage
+  .env.example                                empty VLEEDS_LOCAL_TEST_* names
+  docs/reports/P1-PILOT-local-auth-activation.txt  NEW (this)
+  (.env.local: local values, git-ignored, not committed)
+
+
+--------------------------------------------------------------------------------
+10. REMAINING PILOT-READINESS ITEMS
+--------------------------------------------------------------------------------
+  R1 Complete onboarding as pilot@vleeds.test, then run the manual
+     end-to-end check on the real stack: Evaluate fit, Refresh lead scores
+     (including one excluded company), one logged outcome. The local
+     SUPABASE_SERVICE_ROLE_KEY is now set, so the trusted score writer is
+     configured. Restart `next dev` if it was started before the key was
+     added.
+  R2 Before the hosted pilot, check the hosted project's Auth settings:
+     Email provider ON, "Allow new users to sign up" OFF, minimum password
+     length 12, and site/redirect URLs.
+  R3 Live provider smoke tests (Google Places, Hunter). These need keys
+     and separate approval.
+  R4 Carried: axe/screen-reader pass, member directory, CI check that
+     db:types output matches the committed file.
+================================================================================
